@@ -4,22 +4,22 @@ import Synchronization
 
 class ThreadSafeChannel<T> {
     private var buffer: [T] = []
-    private let queue = DispatchQueue(label: "tschannel", attributes: .concurrent)
-    private let semaphore = DispatchSemaphore(value: 0)
+    private let condition = NSCondition()
 
     func send(_ value: T) {
-        queue.async(flags: .barrier) {
-            self.buffer.append(value)
-            self.semaphore.signal()
-        }
+        condition.lock()
+        buffer.append(value)
+        condition.signal()
+        condition.unlock()
     }
 
     func receive() -> T? {
-        semaphore.wait()
-        return queue.sync {
-            guard !buffer.isEmpty else { return nil }
-            return buffer.removeFirst()
+        condition.lock()
+        defer { condition.unlock() }
+        while buffer.isEmpty {
+            condition.wait()
         }
+        return buffer.removeFirst()
     }
 }
 

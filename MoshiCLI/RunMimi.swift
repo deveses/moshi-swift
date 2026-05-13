@@ -9,13 +9,11 @@ import MLX
 import MLXNN
 import MoshiLib
 
-func makeMimi(numCodebooks: Int) throws -> Mimi {
+func makeMimi(numCodebooks: Int, modelFilename: String = defaultMimiModel) throws -> Mimi {
     let cfg = MimiConfig.mimi_2024_07(numCodebooks: numCodebooks)
     let model = Mimi(cfg, bSize: 1)
 
-    let url = try downloadFromHub(
-        id: "lmz/moshi-swift",
-        filename: "tokenizer-dbaa9758-checkpoint125.safetensors")
+    let url = try maybeDownloadFromHub(filename: modelFilename)
     let origWeights = try loadArrays(url: url)
     var weights: [String: MLXArray] = [:]
     for (var key, var weight) in origWeights {

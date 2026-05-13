@@ -1,24 +1,72 @@
 import AVFoundation
+#if os(macOS)
+import CoreAudio
+#endif
 import Foundation
+
+#if os(macOS)
+private func defaultAudioDeviceID(selector: AudioObjectPropertySelector) -> AudioDeviceID? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var deviceID = AudioDeviceID(0)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let status = AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID)
+    guard status == noErr, deviceID != 0 else {
+        return nil
+    }
+    return deviceID
+}
+
+private func audioDeviceName(_ deviceID: AudioDeviceID) -> String? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioObjectPropertyName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var name = "" as CFString
+    var size = UInt32(MemoryLayout<CFString>.size)
+    let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &name)
+    guard status == noErr else {
+        return nil
+    }
+    return name as String
+}
+
+private func defaultAudioDeviceDescription(
+    selector: AudioObjectPropertySelector, fallback: String
+) -> String {
+    guard let deviceID = defaultAudioDeviceID(selector: selector) else {
+        return fallback
+    }
+    let name = audioDeviceName(deviceID) ?? fallback
+    return "\(name) (id: \(deviceID))"
+}
+#endif
+
+private func formatDescription(_ format: AVAudioFormat) -> String {
+    "\(format.channelCount) ch, \(Int(format.sampleRate)) Hz, \(format.commonFormat)"
+}
 
 class ThreadSafeChannel<T> {
     private var buffer: [T] = []
-    private let queue = DispatchQueue(label: "tschannel", attributes: .concurrent)
-    private let semaphore = DispatchSemaphore(value: 0)
+    private let condition = NSCondition()
 
     func send(_ value: T) {
-        queue.async(flags: .barrier) {
-            self.buffer.append(value)
-            self.semaphore.signal()
-        }
+        condition.lock()
+        buffer.append(value)
+        condition.signal()
+        condition.unlock()
     }
 
     func receive() -> T? {
-        semaphore.wait()
-        return queue.sync {
-            guard !buffer.isEmpty else { return nil }
-            return buffer.removeFirst()
+        condition.lock()
+        defer { condition.unlock() }
+        while buffer.isEmpty {
+            condition.wait()
         }
+        return buffer.removeFirst()
     }
 }
 
@@ -52,6 +100,15 @@ class MicrophoneCapture {
             print("Could not create target format")
             return
         }
+
+        #if os(macOS)
+        let inputDevice = defaultAudioDeviceDescription(
+            selector: kAudioHardwarePropertyDefaultInputDevice,
+            fallback: "unknown input device")
+        print("input device: \(inputDevice)")
+        #endif
+        print("input format: \(formatDescription(inputFormat))")
+        print("capture format: \(formatDescription(mono24kHzFormat))")
 
         // Resample the buffer to match the desired format
         let converter = AVAudioConverter(from: inputFormat, to: mono24kHzFormat)
@@ -182,7 +239,13 @@ class AudioPlayer {
             return noErr
         }
         let af = sourceNode.inputFormat(forBus: 0)
-        print("playing audio-format \(af)")
+        #if os(macOS)
+        let outputDevice = defaultAudioDeviceDescription(
+            selector: kAudioHardwarePropertyDefaultOutputDevice,
+            fallback: "unknown output device")
+        print("output device: \(outputDevice)")
+        #endif
+        print("playback format: \(formatDescription(af))")
         audioEngine.attach(sourceNode)
         audioEngine.connect(sourceNode, to: audioEngine.mainMixerNode, format: audioFormat)
         try audioEngine.start()

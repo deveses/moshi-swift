@@ -20,10 +20,22 @@ struct CustomError: Error {
     }
 }
 
+struct MoshiModelPreset {
+    let name: String
+    let cfg: LmConfig
+    let modelRepo: String
+    let modelFilename: String
+    let localResourceName: String?
+    let mimiRepo: String
+    let mimiFilename: String
+}
+
 enum ModelSelect: String, CaseIterable, Identifiable {
+    case moshi
+    case moshiQ4
+    case moshiQ8
     case mimi
     case asr
-    case hibiki
     case helium
     case qwen
 
@@ -31,8 +43,16 @@ enum ModelSelect: String, CaseIterable, Identifiable {
 
     var name: String {
         switch self {
-        case .hibiki:
-            return "Hibiki 1B"
+        case .moshi:
+            return "Moshi 1B"
+        case .moshiQ4:
+            return "Moshi q4"
+        case .moshiQ8:
+            return "Moshi q8"
+        case .asr:
+            return "ASR 1B"
+        case .qwen:
+            return "Qwen 0.5B"
         default:
             return rawValue.capitalized
         }
@@ -40,11 +60,61 @@ enum ModelSelect: String, CaseIterable, Identifiable {
 
     var description: String {
         switch self {
-        case .hibiki:
+        case .moshi:
             return
-                "A French to English simultaneous translation model designed for real-time speech translation."
+                "A full-duplex speech-text dialogue model that listens through the microphone and streams generated text and audio."
+        case .moshiQ4:
+            return
+                "The larger Moshi model quantized to 4 bits. This is a heavier download and needs more memory than Moshi 1B."
+        case .moshiQ8:
+            return
+                "The larger Moshi model quantized to 8 bits. This is the largest Moshi option and needs substantially more memory."
+        case .asr:
+            return
+                "A speech recognition model that transcribes microphone input in real time."
+        case .mimi:
+            return
+                "The Mimi neural audio codec demo. It encodes microphone audio and plays decoded sample audio."
+        case .helium:
+            return "A text language model demo that generates text from a fixed prompt."
+        case .qwen:
+            return "A Qwen text generation demo that generates text from a fixed prompt."
         default:
             return ""
+        }
+    }
+
+    var moshiPreset: MoshiModelPreset? {
+        switch self {
+        case .moshi:
+            return MoshiModelPreset(
+                name: "Moshi 1B",
+                cfg: LmConfig.moshi1b(audioDelay: 2),
+                modelRepo: "lmz/moshi-swift",
+                modelFilename: "moshi-37c6cfd6@200.q6.safetensors",
+                localResourceName: "moshi-37c6cfd6@200.q6",
+                mimiRepo: "lmz/moshi-swift",
+                mimiFilename: "tokenizer-dbaa9758-checkpoint125.safetensors")
+        case .moshiQ4:
+            return MoshiModelPreset(
+                name: "Moshi q4",
+                cfg: LmConfig.moshi_2024_07(),
+                modelRepo: "kyutai/moshika-mlx-q4",
+                modelFilename: "model.q4.safetensors",
+                localResourceName: nil,
+                mimiRepo: "kyutai/moshika-mlx-q4",
+                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors")
+        case .moshiQ8:
+            return MoshiModelPreset(
+                name: "Moshi q8",
+                cfg: LmConfig.moshi_2024_07(),
+                modelRepo: "kyutai/moshika-mlx-q8",
+                modelFilename: "model.q8.safetensors",
+                localResourceName: nil,
+                mimiRepo: "kyutai/moshika-mlx-q8",
+                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors")
+        default:
+            return nil
         }
     }
 }
@@ -56,7 +126,7 @@ struct ContentView: View {
     @Environment(DeviceStat.self) private var deviceStat
 
     // Currently available models
-    private let availableModels: [ModelSelect] = [.hibiki, .asr]
+    private let availableModels: [ModelSelect] = [.moshi, .moshiQ4, .moshiQ8, .asr]
     var body: some View {
         Group {
             if availableModels.count == 1 {
@@ -72,7 +142,7 @@ struct ContentView: View {
                             List {
                                 ForEach(availableModels) { modelType in
                                     NavigationLink(
-                                        modelType.rawValue,
+                                        modelType.name,
                                         destination: {
                                             ModelView(
                                                 model: $model,
@@ -208,13 +278,15 @@ class Evaluator {
         return model
     }
 
-    func makeMimi(numCodebooks: Int) async throws -> Mimi {
+    func makeMimi(
+        numCodebooks: Int,
+        repoID: String = "lmz/moshi-swift",
+        filename: String = "tokenizer-dbaa9758-checkpoint125.safetensors"
+    ) async throws -> Mimi {
         let cfg = MimiConfig.mimi_2024_07(numCodebooks: numCodebooks)
         let model = Mimi(cfg, bSize: 1)
 
-        let url = try await downloadFromHub(
-            id: "lmz/moshi-swift",
-            filename: "tokenizer-dbaa9758-checkpoint125.safetensors")
+        let url = try await downloadFromHub(id: repoID, filename: filename)
         let origWeights = try loadArrays(url: url)
         var weights: [String: MLXArray] = [:]
         for (var key, var weight) in origWeights {
@@ -361,7 +433,7 @@ class Evaluator {
     }
 
     func load(_ sm: ModelSelect) async throws -> ModelState {
-        if case .loaded(let m, sm) = self.loadState {
+        if case .loaded(let m, let loadedModel) = self.loadState, loadedModel == sm {
             return m
         }
         // Start by reseting loadState so as to release the memory used
@@ -369,8 +441,11 @@ class Evaluator {
         self.loadState = .idle
         let m: ModelState
         switch sm {
-        case .hibiki:
-            let model = try await MoshiModel(self, self.cb)
+        case .moshi, .moshiQ4, .moshiQ8:
+            guard let preset = sm.moshiPreset else {
+                throw CustomError("missing Moshi preset for \(sm.name)")
+            }
+            let model = try await MoshiModel(self, self.cb, preset: preset)
             m = ModelState(model)
         case .mimi:
             let model = try await MimiModel(self, self.cb)
@@ -617,21 +692,32 @@ struct MoshiModel: Model {
     let cb: Callbacks
 
     init(_ ev: Evaluator, _ cb: Callbacks) async throws {
+        guard let preset = ModelSelect.moshi.moshiPreset else {
+            throw CustomError("missing Moshi 1B preset")
+        }
+        try await self.init(ev, cb, preset: preset)
+    }
+
+    init(_ ev: Evaluator, _ cb: Callbacks, preset: MoshiModelPreset) async throws {
         await ev.setModelInfo("building model")
         let url: URL
-        let cfg = LmConfig.moshi1b(audioDelay: 2)
-        let localURL = Bundle.main.url(
-            forResource: "moshi-37c6cfd6@200.q6", withExtension: "safetensors")
+        let cfg = preset.cfg
+        let localURL = preset.localResourceName.flatMap {
+            Bundle.main.url(forResource: $0, withExtension: "safetensors")
+        }
         switch localURL {
         case .none:
             url = try await ev.downloadFromHub(
-                id: "lmz/moshi-swift", filename: "moshi-37c6cfd6@200.q6.safetensors")
+                id: preset.modelRepo, filename: preset.modelFilename)
         case .some(let localURL):
             url = localURL
         }
         self.moshi = try await ev.makeMoshi(url, cfg)
-        await ev.setModelName(url.lastPathComponent)
-        self.mimi = try await ev.makeMimi(numCodebooks: 16)
+        await ev.setModelName("\(preset.name): \(url.lastPathComponent)")
+        self.mimi = try await ev.makeMimi(
+            numCodebooks: 16,
+            repoID: preset.mimiRepo,
+            filename: preset.mimiFilename)
         await ev.setModelInfo("model built")
         let maxSteps = cfg.transformer.maxSeqLen
         self.cb = cb

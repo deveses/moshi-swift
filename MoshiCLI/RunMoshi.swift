@@ -39,8 +39,8 @@ func loadVocab(_ cfg: LmConfig) throws -> [Int: String] {
     return dictionary
 }
 
-func runMoshiMic(_ url: URL, cfg: LmConfig) throws {
-    let mimi = try makeMimi(numCodebooks: 16)
+func runMoshiMic(_ url: URL, cfg: LmConfig, mimiModel: String = defaultMimiModel) throws {
+    let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
     let moshi = try makeMoshi(url, cfg)
     let vocab = try loadVocab(cfg)
     print("using device \(Device.defaultDevice().description)")
@@ -88,9 +88,15 @@ func runMoshiMic(_ url: URL, cfg: LmConfig) throws {
     microphoneCapture.stopCapturing()
 }
 
-func runMoshi(_ url: URL, cfg: LmConfig, audioFile: URL?, channel: Int = 0) throws {
+func runMoshi(
+    _ url: URL,
+    cfg: LmConfig,
+    audioFile: URL?,
+    channel: Int = 0,
+    mimiModel: String = defaultMimiModel
+) throws {
     let stats = PerfStats()
-    let mimi = try makeMimi(numCodebooks: 16)
+    let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
     let moshi = try makeMoshi(url, cfg)
     let vocab = try loadVocab(cfg)
     print("warming up mimi")

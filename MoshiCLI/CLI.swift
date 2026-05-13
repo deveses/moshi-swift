@@ -11,6 +11,8 @@ import MLXNN
 import MoshiLib
 import Tokenizers
 
+let defaultMimiModel = "hf://lmz/moshi-swift/tokenizer-dbaa9758-checkpoint125.safetensors"
+
 func downloadFromHub(id: String, filename: String) throws -> URL {
     let targetURL = HubApi().localRepoLocation(Hub.Repo(id: id)).appending(path: filename)
     if FileManager.default.fileExists(atPath: targetURL.path) {
@@ -96,8 +98,11 @@ struct Run: ParsableCommand {
     @Option(help: "the config size")
     var config: Config = .moshi1b
 
+    @Option(help: "the Mimi codec checkpoint to use")
+    var mimiModel: String = defaultMimiModel
+
     mutating func run() throws {
-        let model = URL(fileURLWithPath: model)
+        let model = try maybeDownloadFromHub(filename: model)
         let cfg =
             switch config {
             case .moshi1b: LmConfig.moshi1b(audioDelay: audioDelay)
@@ -106,12 +111,12 @@ struct Run: ParsableCommand {
 
         switch input {
         case .none:
-            try runMoshi(model, cfg: cfg, audioFile: nil)
-        case .some("mic"): try runMoshiMic(model, cfg: cfg)
+            try runMoshi(model, cfg: cfg, audioFile: nil, mimiModel: mimiModel)
+        case .some("mic"): try runMoshiMic(model, cfg: cfg, mimiModel: mimiModel)
         case .some(let input):
             let audioFile = URL(fileURLWithPath: input)
             try runMoshi(
-                model, cfg: cfg, audioFile: audioFile, channel: channel)
+                model, cfg: cfg, audioFile: audioFile, channel: channel, mimiModel: mimiModel)
         }
     }
 }

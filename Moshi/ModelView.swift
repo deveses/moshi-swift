@@ -102,7 +102,7 @@ struct ModelView: View {
     }
 
     private func generate() {
-        Task {
+        Task(priority: .utility) {
             await model.generate(self.modelType)
         }
     }

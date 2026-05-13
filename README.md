@@ -19,6 +19,21 @@ Compile and test using the command line:
 ```bash
 make run-1b
 ```
+This processes the default sample audio and writes `moshi-out.wav`,
+`moshi-codes.safetensors`, and `moshi-trace.json`.
+
+For the live microphone loop, run:
+```bash
+make run-1b-mic
+```
+
+The larger MLX Moshi checkpoints are also available in q4 and q8 quantized
+formats. These names refer to 4-bit and 8-bit quantization, not 4B/8B parameter
+counts:
+```bash
+make run-q4-mic
+make run-q8-mic
+```
 
 The checkpoints are automatically downloaded from the huggingface hub. So you
 may have to wait for a bit when running the model for the first time.
