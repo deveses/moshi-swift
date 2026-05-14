@@ -34,6 +34,7 @@ enum ModelSelect: String, CaseIterable, Identifiable {
     case moshi
     case moshiQ4
     case moshiQ8
+    case moshiBf16
     case mimi
     case asr
     case helium
@@ -49,6 +50,8 @@ enum ModelSelect: String, CaseIterable, Identifiable {
             return "Moshi q4"
         case .moshiQ8:
             return "Moshi q8"
+        case .moshiBf16:
+            return "Moshi BF16"
         case .asr:
             return "ASR 1B"
         case .qwen:
@@ -69,6 +72,9 @@ enum ModelSelect: String, CaseIterable, Identifiable {
         case .moshiQ8:
             return
                 "The larger Moshi model quantized to 8 bits. This is the largest Moshi option and needs substantially more memory."
+        case .moshiBf16:
+            return
+                "The larger Moshi model in BF16 precision. This is the heaviest Moshi option and needs the most memory."
         case .asr:
             return
                 "A speech recognition model that transcribes microphone input in real time."
@@ -113,6 +119,15 @@ enum ModelSelect: String, CaseIterable, Identifiable {
                 localResourceName: nil,
                 mimiRepo: "kyutai/moshika-mlx-q8",
                 mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors")
+        case .moshiBf16:
+            return MoshiModelPreset(
+                name: "Moshi BF16",
+                cfg: LmConfig.moshi_2024_07(),
+                modelRepo: "kyutai/moshika-mlx-bf16",
+                modelFilename: "model.safetensors",
+                localResourceName: nil,
+                mimiRepo: "kyutai/moshika-mlx-bf16",
+                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors")
         default:
             return nil
         }
@@ -126,7 +141,7 @@ struct ContentView: View {
     @Environment(DeviceStat.self) private var deviceStat
 
     // Currently available models
-    private let availableModels: [ModelSelect] = [.moshi, .moshiQ4, .moshiQ8, .asr]
+    private let availableModels: [ModelSelect] = [.moshi, .moshiQ4, .moshiQ8, .moshiBf16, .asr]
     var body: some View {
         Group {
             if availableModels.count == 1 {
@@ -441,7 +456,7 @@ class Evaluator {
         self.loadState = .idle
         let m: ModelState
         switch sm {
-        case .moshi, .moshiQ4, .moshiQ8:
+        case .moshi, .moshiQ4, .moshiQ8, .moshiBf16:
             guard let preset = sm.moshiPreset else {
                 throw CustomError("missing Moshi preset for \(sm.name)")
             }
