@@ -156,8 +156,9 @@ Expected impact: high for custom checkpoints
 Instead of using a uniform q4/q8/BF16 model, use a mixed policy:
 
 - Main transformer MLP and attention projections: q4 or q6
-- Embeddings: q8 or BF16
-- Output heads: q8 or BF16
+- Text embeddings: q8 or BF16
+- Audio embeddings (`cfg.audioCodebooks` × `audioVocabSize` × `dModel` — ~256 MiB at BF16 for the 7B config with 16 codebooks): candidate for q8
+- Output heads (`textLinear` is `dModel × textOutVocabSize`, also large): q8 or BF16
 - First and last transformer layers: q8 or BF16
 - Depformer: q8 or q6
 - Mimi: q8 or BF16, depending on audio quality
@@ -173,6 +174,8 @@ Possible implementation paths:
 Important note:
 
 Runtime `quantize(model:)` must match the checkpoint tensor format. If the checkpoint is already q8 or q4, the module structure must match those tensors before `update(parameters:)`.
+
+MLX's `quantize(model:filter:)` takes a predicate that selects which `Linear` / `Embedding` modules to quantize, so per-module selectivity is straightforward. The harder constraint is that the predicate must match the checkpoint exactly: you cannot "skip quantization" on a tensor that is already quantized on disk. Realistic mixed-precision therefore requires producing custom checkpoints offline (see section 12), not just runtime filtering against stock q8 / BF16 weights.
 
 ## 7. Keep Mimi Small or Optional
 
@@ -227,7 +230,8 @@ Ideas:
 - Reset output buffers, traces, stats, and temporary URLs before loading.
 - Ensure audio player/microphone resources are stopped before switching.
 - Add a short delay after releasing a model before loading the next.
-- Investigate MLX cache clearing APIs, if available.
+- Use `MLX.GPU.set(cacheLimit:)` to cap MLX's allocator cache so transient buffers from the previous model are returned to the system sooner. Also useful during warmup/load phases (section 8).
+- On macOS, document the `sysctl iogpu.wired_limit_mb=<MB>` knob: it lets the GPU use more of physical RAM than the default. No code change, but the right escape hatch to mention next to the 8 GB warning in section 11.
 
 Target:
 
@@ -266,6 +270,12 @@ Potential check:
 
 - Use `ProcessInfo.processInfo.physicalMemory`.
 - If <= 8 GB, default q8/BF16 to low memory settings.
+
+Branch on platform, not just total RAM:
+
+- iOS has a much tighter per-process limit than macOS (jetsam, often around 3 GB on 8 GB iPhones), so the same `physicalMemory` value implies very different budgets.
+- Pick presets per platform: e.g. iOS defaults to q4 + reduced context + TurboQuant KV; macOS at the same RAM tier can offer q8 low-memory.
+- On macOS, the `sysctl iogpu.wired_limit_mb` knob (see section 9) is a runtime escape hatch — surface it in the warning text rather than only checking `physicalMemory`.
 
 ## 12. Offline Checkpoint Conversion
 
@@ -317,17 +327,23 @@ Add lightweight logging in debug builds:
 - MLX active memory
 - MLX cache memory
 - peak memory
+- KV cache size: `LM` already exposes `kvCacheMemoryBytes()` ([LM.swift](MoshiLib/LM.swift)), which sums main + depformer caches — use it directly instead of estimating.
 
 The app already shows GPU memory stats; we should also log phase boundaries during loading.
 
 ## Suggested Roadmap
 
+### Phase 0: Instrument First
+
+- Wire up the section 13 measurements (resident memory, MLX active/cache, peak, `kvCacheMemoryBytes()`) at every load/warmup/step boundary.
+- Capture before/after numbers for q4, q8, BF16 on a representative machine.
+- Without these baselines, the remaining priorities are guesses.
+
 ### Phase 1: Make Startup Less Spiky
 
 - Scope/release intermediate weight dictionaries.
 - Disable or shrink warmup for q8/BF16 low-memory mode.
-- Add memory logging around load phases.
-- Add 8 GB warning in the app.
+- Add 8 GB warning in the app (platform-aware: iOS vs macOS).
 
 ### Phase 2: Lower Runtime Memory
 
@@ -358,4 +374,59 @@ For an 8 GB Mac, the practical first target should be:
 - optional warmup
 - no trace retention in low-memory mode
 
+For iOS specifically (much tighter per-process budget than macOS at the same total RAM): default to q4 + reduced context + TurboQuant KV cache. The KV cache is the biggest single lever once weights are q4, and the TurboQuant path is already implemented — surfacing it as the default on iOS is mostly a wiring change rather than new work.
+
 Trying to make full BF16 large Moshi run comfortably on 8 GB may be unrealistic without reducing context, skipping components, or moving to mixed/custom quantized weights.
+
+## Estimated Savings for the q8 Model
+
+All numbers below are back-of-envelope from the `v1_7b` config (32 layers × 32 heads × 128 head dim × context 3000, ~7B params) and `moshi_2024_07` (16 audio codebooks, 32k text vocab). They should be replaced by Phase 0 measurements before committing to any phase.
+
+### Baseline q8 footprint (approximate)
+
+| Component | Approx size |
+| --- | --- |
+| Weights (q8, group 64): ~1.125 bytes/param × 7B | ~7.4 GB |
+| Main KV cache @ context 3000, BF16 compute dtype | ~1.57 GB |
+| Depformer KV cache (context 8, 6 layers) | ~3 MB |
+| Mimi weights + streaming state | ~300–500 MB |
+| Activations / transient MLX buffers | ~0.5–1 GB |
+| **Total steady-state** | **~10 GB** |
+
+On an 8 GB Mac q8 is over-budget even before the startup spike — that is the gap to close.
+
+### Per-lever estimated savings (q8)
+
+| Lever | Targets | Approx savings | Notes |
+| --- | --- | --- | --- |
+| §3 Reduce context 3000 → 1024 | main KV | ~1.0 GB | Linear; 1536 saves ~0.8 GB, 512 saves ~1.3 GB |
+| §5 TurboQuant KV (3-bit, already built) | main KV | ~0.4–1.2 GB | Stacks with §3 multiplicatively |
+| §6 Mixed precision (q4 bulk + q8 sensitive) | weights | ~2.0–2.4 GB | Biggest weight win. Requires offline conversion (§12); cannot be done at runtime against the stock q8 checkpoint |
+| §1/§2 Release intermediate weight dicts | startup peak | ~0.3–1 GB peak only | Doesn't affect steady-state; verify whether `loadArrays` already mmaps |
+| §8 Skip/shrink warmup | startup peak | ~0.2–0.5 GB peak | Cost: first tokens slower |
+| §7 Defer Mimi until audio starts | startup peak | ~0.3–0.5 GB | Useful for load-only diagnostic mode |
+| §9 `MLX.GPU.set(cacheLimit:)` | transient | ~0.1–0.3 GB | Trades latency for memory |
+| §10 No trace/token retention | runtime | ~0.05–0.2 GB | Grows with session length |
+| `iogpu.wired_limit_mb` (macOS knob) | budget, not usage | n/a | Increases what is *available*, does not reduce what is *used* |
+
+### Realistic combined scenarios
+
+**Scenario A — runtime-only changes (no new checkpoints):**
+context 1024 + TurboQuant KV + no warmup + no trace + cache limit
+
+- KV: 1.57 → ~0.12 GB (saves ~1.45 GB)
+- Peak: −0.5 GB
+- Total ~10 GB → ~8 GB steady-state. Borderline; might run on 8 GB Mac with nothing else open. Still tight on iOS.
+
+**Scenario B — runtime + Phase 3 mixed-precision checkpoint:**
+Scenario A + q4-bulk / q8-sensitive custom checkpoint
+
+- Weights: 7.4 → ~5.0 GB (saves ~2.4 GB)
+- KV (same as A): saves ~1.45 GB
+- Total ~10 GB → ~5.5–6 GB. Fits comfortably on 8 GB Mac; plausible on a high-RAM iPhone.
+
+### Takeaways
+
+- The single biggest q8 lever not yet available is **mixed-precision checkpoints** (§6 + §12) — ~2 GB on weights. Everything else combined is ~1.5–2 GB.
+- **TurboQuant + context cut** are stackable and already mostly built, so try them first to confirm the model runs at all before investing in the offline conversion pipeline.
+- Startup-spike savings (§1, §2, §8) could be much smaller than the table suggests if mlx-swift already mmaps `safetensors`. Phase 0 measurement should resolve this before any structural changes.
