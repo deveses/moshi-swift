@@ -199,12 +199,13 @@ class Evaluator {
     var statsSummary: StatsSummary = StatsSummary()
     var bufferedDuration: Double = 0.0
     var totalDuration: Double = 0.0
+    var kvCacheMemoryBytes: Int = 0
     let shouldStop: Atomic<Bool> = .init(false)
     let cb: PerfStats = PerfStats()
 
     enum LoadState {
         case idle
-        case loaded(ModelState, ModelSelect)
+        case loaded(ModelState, ModelSelect, Bool)
     }
 
     var loadState = LoadState.idle
@@ -249,10 +250,10 @@ class Evaluator {
         return dictionary
     }
 
-    func makeMoshi(_ url: URL, _ cfg: LmConfig) throws -> LM {
+    func makeMoshi(_ url: URL, _ cfg: LmConfig, useTurboQuant: Bool = false) throws -> LM {
         let weights = try loadArrays(url: url)
         let parameters = ModuleParameters.unflattened(weights)
-        let model = LM(cfg, bSize: 1)
+        let model = LM(cfg, bSize: 1, useTurboQuant: useTurboQuant)
         if url.lastPathComponent.hasSuffix(".q4.safetensors") {
             quantize(model: model, groupSize: 32, bits: 4)
         } else if url.lastPathComponent.hasSuffix(".q6.safetensors") {
@@ -363,16 +364,17 @@ class Evaluator {
         self.shouldStop.store(true, ordering: .relaxed)
     }
 
-    func generate(_ sm: ModelSelect) async {
+    func generate(_ sm: ModelSelect, useTurboQuant: Bool = false) async {
         guard !running else { return }
 
         self.shouldStop.store(false, ordering: .relaxed)
         self.modelInfo = "starting"
         self.output = ""
         self.totalDuration = 0.0
+        self.kvCacheMemoryBytes = 0
         running = true
         do {
-            let model = try await load(sm)
+            let model = try await load(sm, useTurboQuant: useTurboQuant)
             let urls = try await model.perform { model in
                 model.reset()
                 await self.cb.onReset()
@@ -398,16 +400,25 @@ class Evaluator {
                         GPU.clearCache()
                     }
                     let currentStep = step
+                    let currentKVCacheMemoryBytes =
+                        currentStep == 1 || currentStep % 5 == 0 ? model.kvCacheMemoryBytes() : nil
                     Task { @MainActor in
                         if currentStep % 5 == 0 {
                             self.bufferedDuration =
                                 ap.bufferedDuration() + microphoneCapture.bufferedDuration()
                             self.totalDuration = CFAbsoluteTimeGetCurrent() - startTime
                         }
+                        if let currentKVCacheMemoryBytes {
+                            self.kvCacheMemoryBytes = currentKVCacheMemoryBytes
+                        }
                         if currentStep % 20 == 0 {
                             self.statsSummary = self.cb.getSummary(maxEvents: 100)
                         }
                     }
+                }
+                let finalKVCacheMemoryBytes = model.kvCacheMemoryBytes()
+                await MainActor.run {
+                    self.kvCacheMemoryBytes = finalKVCacheMemoryBytes
                 }
                 print()
                 let traceURL = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -447,8 +458,10 @@ class Evaluator {
         running = false
     }
 
-    func load(_ sm: ModelSelect) async throws -> ModelState {
-        if case .loaded(let m, let loadedModel) = self.loadState, loadedModel == sm {
+    func load(_ sm: ModelSelect, useTurboQuant: Bool = false) async throws -> ModelState {
+        if case .loaded(let m, let loadedModel, let loadedTurboQuant) = self.loadState,
+            loadedModel == sm && loadedTurboQuant == useTurboQuant
+        {
             return m
         }
         // Start by reseting loadState so as to release the memory used
@@ -460,13 +473,14 @@ class Evaluator {
             guard let preset = sm.moshiPreset else {
                 throw CustomError("missing Moshi preset for \(sm.name)")
             }
-            let model = try await MoshiModel(self, self.cb, preset: preset)
+            let model = try await MoshiModel(
+                self, self.cb, preset: preset, useTurboQuant: useTurboQuant)
             m = ModelState(model)
         case .mimi:
             let model = try await MimiModel(self, self.cb)
             m = ModelState(model)
         case .asr:
-            let model = try await AsrModel(self, self.cb)
+            let model = try await AsrModel(self, self.cb, useTurboQuant: useTurboQuant)
             m = ModelState(model)
         case .helium:
             let model = try await HeliumModel(self, self.cb)
@@ -475,7 +489,7 @@ class Evaluator {
             let model = try await QwenModel_(self, self.cb)
             m = ModelState(model)
         }
-        self.loadState = .loaded(m, sm)
+        self.loadState = .loaded(m, sm, useTurboQuant)
         return m
     }
 
@@ -492,6 +506,13 @@ protocol Model {
     mutating func reset()
     // If onMicrophonePcm returns true continue, otherwise break.
     mutating func onMicrophonePcm(_ pcm: MLXArray, ap: AudioPlayer, ev: Evaluator) -> Bool
+    func kvCacheMemoryBytes() -> Int
+}
+
+extension Model {
+    func kvCacheMemoryBytes() -> Int {
+        0
+    }
 }
 
 struct MimiModel: Model {
@@ -624,6 +645,10 @@ struct HeliumModel: Model {
     mutating func reset() {
     }
 
+    func kvCacheMemoryBytes() -> Int {
+        helium.kvCacheMemoryBytes()
+    }
+
     mutating func onMicrophonePcm(_ pcm: MLXArray, ap: AudioPlayer, ev: Evaluator) -> Bool {
         let maxSteps = helium.cfg.transformer.maxSeqLen
         let sampler = Sampler()
@@ -659,6 +684,10 @@ struct AsrModel: Model {
     var asr: ASR
 
     init(_ ev: Evaluator, _ cb: Callbacks) async throws {
+        try await self.init(ev, cb, useTurboQuant: false)
+    }
+
+    init(_ ev: Evaluator, _ cb: Callbacks, useTurboQuant: Bool = false) async throws {
         await ev.setModelInfo("building model")
         let url: URL
         let localURL = Bundle.main.url(forResource: "stt-model", withExtension: "safetensors")
@@ -670,7 +699,7 @@ struct AsrModel: Model {
             url = localURL
         }
         let cfg = LmConfig.asr1b()
-        let moshi = try await ev.makeMoshi(url, cfg)
+        let moshi = try await ev.makeMoshi(url, cfg, useTurboQuant: useTurboQuant)
         let mimi = try await ev.makeMimi(numCodebooks: 32)
         await ev.setModelInfo("model built")
         let vocab = try await ev.loadVocab(cfg)
@@ -684,6 +713,10 @@ struct AsrModel: Model {
 
     mutating func reset() {
         asr.reset()
+    }
+
+    func kvCacheMemoryBytes() -> Int {
+        asr.kvCacheMemoryBytes()
     }
 
     mutating func onMicrophonePcm(_ pcm: MLXArray, ap: AudioPlayer, ev: Evaluator) -> Bool {
@@ -713,7 +746,10 @@ struct MoshiModel: Model {
         try await self.init(ev, cb, preset: preset)
     }
 
-    init(_ ev: Evaluator, _ cb: Callbacks, preset: MoshiModelPreset) async throws {
+    init(
+        _ ev: Evaluator, _ cb: Callbacks, preset: MoshiModelPreset,
+        useTurboQuant: Bool = false
+    ) async throws {
         await ev.setModelInfo("building model")
         let url: URL
         let cfg = preset.cfg
@@ -727,8 +763,9 @@ struct MoshiModel: Model {
         case .some(let localURL):
             url = localURL
         }
-        self.moshi = try await ev.makeMoshi(url, cfg)
-        await ev.setModelName("\(preset.name): \(url.lastPathComponent)")
+        self.moshi = try await ev.makeMoshi(url, cfg, useTurboQuant: useTurboQuant)
+        let quantizationName = useTurboQuant ? "TurboQuant KV" : "standard KV"
+        await ev.setModelName("\(preset.name): \(url.lastPathComponent) (\(quantizationName))")
         self.mimi = try await ev.makeMimi(
             numCodebooks: 16,
             repoID: preset.mimiRepo,
@@ -749,6 +786,10 @@ struct MoshiModel: Model {
     mutating func reset() {
         mimi.resetState()
         gen.reset()
+    }
+
+    func kvCacheMemoryBytes() -> Int {
+        moshi.kvCacheMemoryBytes()
     }
 
     mutating func onMicrophonePcm(_ pcm: MLXArray, ap: AudioPlayer, ev: Evaluator) -> Bool {

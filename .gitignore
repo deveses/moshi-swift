@@ -21,3 +21,4 @@ moshi-trace.json
 bria*safetensors
 bria*wav
 export/*
+models/*

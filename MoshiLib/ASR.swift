@@ -41,6 +41,10 @@ public class ASR {
         cb.onReset()
     }
 
+    public func kvCacheMemoryBytes() -> Int {
+        moshi.kvCacheMemoryBytes()
+    }
+
     public func onPcmInput(_ pcm: MLXArray) -> [String] {
         var tokens: [String] = []
         let codebooks = moshi.cfg.audioCodebooks

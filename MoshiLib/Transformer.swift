@@ -208,7 +208,13 @@ private class Attention: Module {
             q = rope(q, offset: offset)
             k = rope(k, offset: offset)
         }
-        if let cache {
+        if let turboQuantCache = cache as? TurboQuantKVCache {
+            let x = turboQuantCache.attention(
+                queries: q, keys: k, values: v, scale: self.scale, mask: mask,
+                context: self.cfg.context
+            ).transposed(0, 2, 1, 3).reshaped(B, T, H)
+            return outProj(x)
+        } else if let cache {
             (k, v) = cache.update(keys: k, values: v)
         }
         let kLen = k.dim(2)
@@ -314,12 +320,16 @@ public class Transformer: Module {
         return x
     }
 
-    public func makeCache(bSize: Int) -> [KVCache] {
+    public func makeCache(bSize: Int, useTurboQuant: Bool = false) -> [KVCache] {
         let kvHeads = cfg.numHeads / cfg.kvRepeat
         let dtype = self.layers.first!.selfAttn.inProj.weight.dtype
-        let cache = (0..<cfg.numLayers).map { _ in
+        let cache = (0..<cfg.numLayers).map { layerIdx in
             let cache: KVCache
-            if cfg.useRotatingKVCache {
+            if useTurboQuant {
+                cache = TurboQuantKVCache(
+                    headDim: .init(cfg.headDim()), kvHeads: kvHeads, bits: 4, groupSize: 64,
+                    seed: UInt64(42 + layerIdx))
+            } else if cfg.useRotatingKVCache {
                 cache = RotatingKVCache(
                     bSize: bSize, numHeads: kvHeads, maxSize: cfg.context, headDim: cfg.headDim(),
                     dtype: dtype)
@@ -375,7 +385,7 @@ public class ProjectedTransformer: Module {
         return outs
     }
 
-    public func makeCache(bSize: Int) -> [KVCache] {
-        self.transformer.makeCache(bSize: bSize)
+    public func makeCache(bSize: Int, useTurboQuant: Bool = false) -> [KVCache] {
+        self.transformer.makeCache(bSize: bSize, useTurboQuant: useTurboQuant)
     }
 }

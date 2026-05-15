@@ -24,6 +24,7 @@ struct ModelView: View {
     let modelType: ModelSelect
     @Environment(DeviceStat.self) private var deviceStat
     @State var sendToSpeaker = false
+    @State private var useTurboQuant = false
     @State private var showSettings = false
 
     var body: some View {
@@ -33,6 +34,7 @@ struct ModelView: View {
                     CombinedStatsView(
                         summary: model.statsSummary,
                         deviceStat: deviceStat,
+                        kvCacheMemoryBytes: model.kvCacheMemoryBytes,
                         modelInfo: model.modelInfo,
                         modelName: model.modelName,
                         urls: model.urls
@@ -80,8 +82,15 @@ struct ModelView: View {
                             .font(.title2)
                     }
                     .popover(isPresented: $showSettings, arrowEdge: .bottom) {
-                        Toggle(isOn: $sendToSpeaker) {
-                            Label("Use External Speaker", systemImage: "speaker.wave.2")
+                        VStack(alignment: .leading, spacing: 12) {
+                            Toggle(isOn: $useTurboQuant) {
+                                Label("TurboQuant KV Cache", systemImage: "memorychip")
+                            }
+                            .disabled(model.running)
+
+                            Toggle(isOn: $sendToSpeaker) {
+                                Label("Use External Speaker", systemImage: "speaker.wave.2")
+                            }
                         }
                         .padding()
                         .onChange(of: sendToSpeaker) { (_, newValue) in
@@ -102,8 +111,9 @@ struct ModelView: View {
     }
 
     private func generate() {
+        let useTurboQuant = self.useTurboQuant
         Task(priority: .utility) {
-            await model.generate(self.modelType)
+            await model.generate(self.modelType, useTurboQuant: useTurboQuant)
         }
     }
 
@@ -180,6 +190,7 @@ struct OutputSection: View {
 
 struct DeviceStatsView: View {
     let deviceStat: DeviceStat
+    let kvCacheMemoryBytes: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -192,6 +203,10 @@ struct DeviceStatsView: View {
                 label: "Cache Memory",
                 value: deviceStat.gpuUsage.cacheMemory,
                 total: GPU.cacheLimit
+            )
+            MemoryStatRow(
+                label: "KV Cache",
+                value: kvCacheMemoryBytes
             )
             HStack {
                 MemoryStatRow(
@@ -302,6 +317,7 @@ struct StatRow: View {
 struct CombinedStatsView: View {
     let summary: StatsSummary
     let deviceStat: DeviceStat
+    let kvCacheMemoryBytes: Int
     let modelInfo: String
     let modelName: String
     let urls: (URL, URL)?
@@ -374,7 +390,10 @@ struct CombinedStatsView: View {
                         .padding(.vertical)
                         .frame(height: 250)
                         .tag(0)
-                    DeviceStatsView(deviceStat: deviceStat)
+                    DeviceStatsView(
+                        deviceStat: deviceStat,
+                        kvCacheMemoryBytes: kvCacheMemoryBytes
+                    )
                         .padding(.vertical)
                         .tag(1)
                     DebugView(modelInfo: modelInfo, modelName: modelName, urls: urls)

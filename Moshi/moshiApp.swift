@@ -5,6 +5,9 @@
 import AVFoundation
 import Foundation
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 func requestMicrophoneAccess() {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -23,9 +26,20 @@ func requestMicrophoneAccess() {
     }
 }
 
+#if os(macOS)
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+}
+#endif
+
 @main
 struct moshiApp: App {
     @Environment(\.scenePhase) var scenePhase
+#if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+#endif
 
     init() {
         requestMicrophoneAccess()

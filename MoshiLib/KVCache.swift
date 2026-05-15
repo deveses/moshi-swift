@@ -8,6 +8,8 @@
 
 import Foundation
 import MLX
+import MLXLinalg
+import MLXRandom
 
 /// Interface for Key/Value cache for LLMs.
 ///
@@ -103,6 +105,282 @@ class KVCacheSimple: KVCache, Evaluatable {
     ///
     /// See also ``MultiHeadAttention/createAdditiveCausalMask(_:dtype:)`` -- same idea
     /// but doesn't honor the cache offset.
+    func createAttentionMask(h: MLXArray) -> MLXArray? {
+        let t = h.dim(1)
+        if t > 1 {
+            let rinds = MLXArray(Int32(0)..<Int32(offset + t))
+            let linds = offset != 0 ? MLXArray(Int32(offset)..<Int32(offset + t)) : rinds
+            let mask = linds[0..., .newAxis] .< rinds[.newAxis]
+            return (mask * Float32(-1e9)).asType(h.dtype)
+        }
+        return nil
+    }
+}
+
+class TurboQuantKVCache: KVCache, Evaluatable {
+    let kHeadDim: Int
+    let vHeadDim: Int
+    let kvHeads: Int
+    let bits: Int
+    let groupSize: Int
+    let useNormalization: Bool
+    let rotationMatrix: MLXArray?
+
+    var keyData: MLXArray?
+    var keyScales: MLXArray?
+    var keyBiases: MLXArray?
+    var valueData: MLXArray?
+    var valueScales: MLXArray?
+    var valueBiases: MLXArray?
+
+    var offset = 0
+    var step = 256
+
+    init(
+        headDim: IntOrPair, kvHeads: Int, bits: Int = 3, groupSize: Int = 64,
+        useRotation: Bool = true, useNormalization: Bool = true, seed: UInt64 = 42
+    ) {
+        self.kHeadDim = headDim.first
+        self.vHeadDim = headDim.second
+        self.kvHeads = kvHeads
+        self.bits = bits
+        self.groupSize = groupSize
+        self.useNormalization = useNormalization
+        self.rotationMatrix =
+            useRotation ? Self.makeRotationMatrix(dim: headDim.first, seed: seed) : nil
+    }
+
+    public func reset() {
+        self.keyData = nil
+        self.keyScales = nil
+        self.keyBiases = nil
+        self.valueData = nil
+        self.valueScales = nil
+        self.valueBiases = nil
+        self.offset = 0
+        self.step = 256
+    }
+
+    public func innerState() -> [MLXArray] {
+        [keyData, keyScales, keyBiases, valueData, valueScales, valueBiases].compactMap { $0 }
+    }
+
+    private static func makeRotationMatrix(dim: Int, seed: UInt64) -> MLXArray {
+        let key = MLXRandom.key(seed)
+        let random = MLXRandom.normal([dim, dim], dtype: .float32, key: key, stream: .cpu)
+        let (q, r) = MLXLinalg.qr(random, stream: .cpu)
+        let signs = sign(r.diag(stream: .cpu), stream: .cpu)
+        let qCorrected = q * signs[.newAxis, 0...]
+        eval(qCorrected)
+        return qCorrected
+    }
+
+    private func normalizeForCache(_ x: MLXArray) -> (MLXArray, MLXArray) {
+        let norms = ((x * x).sum(axis: -1, keepDims: true) + 1e-8).sqrt()
+        return (x / norms, norms)
+    }
+
+    private func quantizeForCache(_ x: MLXArray) -> (MLXArray, MLXArray, MLXArray) {
+        let (B, H, T, _) = x.shape4
+        let flat = x.flattened(end: -2)
+        let (data, scales, biases) = MLX.quantized(flat, groupSize: groupSize, bits: bits)
+        return (
+            data.reshaped(B, H, T, -1),
+            scales.reshaped(B, H, T, -1),
+            biases.reshaped(B, H, T, -1)
+        )
+    }
+
+    private func ensureCapacity(
+        batchSize: Int, steps incomingSteps: Int, keyPackedDim: Int, keyScaleDim: Int,
+        valuePackedDim: Int, valueScaleDim: Int, dataType: DType, scaleType: DType
+    ) {
+        let previous = self.offset
+        if let keyData, previous + incomingSteps <= keyData.dim(2) {
+            return
+        }
+
+        let nSteps = (step + incomingSteps - 1) / step
+        let extraSteps = nSteps * step
+
+        func expanded(_ current: MLXArray?, lastDim: Int, dtype: DType) -> MLXArray {
+            let zeros = MLXArray.zeros([batchSize, kvHeads, extraSteps, lastDim], dtype: dtype)
+            guard var current else {
+                return zeros
+            }
+            if previous % step != 0 {
+                current = current[.ellipsis, ..<previous, 0...]
+            }
+            return concatenated([current, zeros], axis: 2)
+        }
+
+        self.keyData = expanded(self.keyData, lastDim: keyPackedDim, dtype: dataType)
+        self.keyScales = expanded(self.keyScales, lastDim: keyScaleDim, dtype: scaleType)
+        self.keyBiases = expanded(self.keyBiases, lastDim: keyScaleDim, dtype: scaleType)
+        self.valueData = expanded(self.valueData, lastDim: valuePackedDim, dtype: dataType)
+        self.valueScales = expanded(self.valueScales, lastDim: valueScaleDim, dtype: scaleType)
+        self.valueBiases = expanded(self.valueBiases, lastDim: valueScaleDim, dtype: scaleType)
+    }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        let (qKeys, qValues) = updateQuantized(keys: keys, values: values)
+        var keys = dequantized(
+            qKeys.data, scales: qKeys.scales, biases: qKeys.biases, groupSize: groupSize,
+            bits: bits)
+        var values = dequantized(
+            qValues.data, scales: qValues.scales, biases: qValues.biases, groupSize: groupSize,
+            bits: bits)
+        if let rotationMatrix {
+            keys = keys.matmul(rotationMatrix)
+            values = values.matmul(rotationMatrix)
+        }
+        return (keys, values)
+    }
+
+    private func updateQuantized(keys: MLXArray, values: MLXArray)
+        -> (
+            keys: (data: MLXArray, scales: MLXArray, biases: MLXArray),
+            values: (data: MLXArray, scales: MLXArray, biases: MLXArray)
+        )
+    {
+        let previous = self.offset
+        let incomingSteps = keys.dim(2)
+        let keysForQuantization: MLXArray
+        let keyNorms: MLXArray?
+        let valuesForQuantization: MLXArray
+        let valueNorms: MLXArray?
+        if useNormalization {
+            (keysForQuantization, keyNorms) = normalizeForCache(keys)
+            (valuesForQuantization, valueNorms) = normalizeForCache(values)
+        } else {
+            keysForQuantization = keys
+            keyNorms = nil
+            valuesForQuantization = values
+            valueNorms = nil
+        }
+        let keysToQuantize = rotationMatrix.map { keysForQuantization.matmul($0.T) }
+            ?? keysForQuantization
+        let valuesToQuantize = rotationMatrix.map { valuesForQuantization.matmul($0.T) }
+            ?? valuesForQuantization
+
+        var qKeys = quantizeForCache(keysToQuantize)
+        var qValues = quantizeForCache(valuesToQuantize)
+        if let keyNorms, let valueNorms {
+            qKeys.1 = qKeys.1 * keyNorms
+            qKeys.2 = qKeys.2 * keyNorms
+            qValues.1 = qValues.1 * valueNorms
+            qValues.2 = qValues.2 * valueNorms
+        }
+        ensureCapacity(
+            batchSize: keys.dim(0),
+            steps: incomingSteps,
+            keyPackedDim: qKeys.0.dim(-1),
+            keyScaleDim: qKeys.1.dim(-1),
+            valuePackedDim: qValues.0.dim(-1),
+            valueScaleDim: qValues.1.dim(-1),
+            dataType: qKeys.0.dtype,
+            scaleType: qKeys.1.dtype
+        )
+
+        self.offset += incomingSteps
+
+        self.keyData?[.ellipsis, previous..<self.offset, 0...] = qKeys.0
+        self.keyScales?[.ellipsis, previous..<self.offset, 0...] = qKeys.1
+        self.keyBiases?[.ellipsis, previous..<self.offset, 0...] = qKeys.2
+        self.valueData?[.ellipsis, previous..<self.offset, 0...] = qValues.0
+        self.valueScales?[.ellipsis, previous..<self.offset, 0...] = qValues.1
+        self.valueBiases?[.ellipsis, previous..<self.offset, 0...] = qValues.2
+
+        return currentQuantized()
+    }
+
+    private func currentQuantized()
+        -> (
+            keys: (data: MLXArray, scales: MLXArray, biases: MLXArray),
+            values: (data: MLXArray, scales: MLXArray, biases: MLXArray)
+        )
+    {
+        (
+            (
+                self.keyData![.ellipsis, ..<self.offset, 0...],
+                self.keyScales![.ellipsis, ..<self.offset, 0...],
+                self.keyBiases![.ellipsis, ..<self.offset, 0...]
+            ),
+            (
+                self.valueData![.ellipsis, ..<self.offset, 0...],
+                self.valueScales![.ellipsis, ..<self.offset, 0...],
+                self.valueBiases![.ellipsis, ..<self.offset, 0...]
+            )
+        )
+    }
+
+    func attention(
+        queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float, mask: MLXArray?,
+        context: Int
+    ) -> MLXArray {
+        var (qKeys, qValues) = updateQuantized(keys: keys, values: values)
+        let (B, queryHeads, querySteps, headDim) = queries.shape4
+        let keySteps = qKeys.data.dim(2)
+        let targetSteps = querySteps + min(context, keySteps - querySteps)
+        var mask = mask
+
+        if targetSteps < keySteps {
+            let start = keySteps - targetSteps
+            qKeys = (
+                qKeys.data[.ellipsis, start..., 0...],
+                qKeys.scales[.ellipsis, start..., 0...],
+                qKeys.biases[.ellipsis, start..., 0...]
+            )
+            qValues = (
+                qValues.data[.ellipsis, start..., 0...],
+                qValues.scales[.ellipsis, start..., 0...],
+                qValues.biases[.ellipsis, start..., 0...]
+            )
+        }
+
+        if let m = mask {
+            let maskLen = m.dim(-1)
+            if qKeys.data.dim(2) < maskLen {
+                let start = maskLen - qKeys.data.dim(2)
+                mask = m[0..., start...]
+            }
+        }
+
+        let repeats = queryHeads / kvHeads
+        var rotatedQueries = queries * scale
+        if let rotationMatrix {
+            rotatedQueries = rotatedQueries.matmul(rotationMatrix.T)
+        }
+        if repeats > 1 {
+            rotatedQueries = rotatedQueries.reshaped(B, kvHeads, repeats, querySteps, headDim)
+        } else {
+            rotatedQueries = rotatedQueries[0..., 0..., .newAxis, 0..., 0...]
+        }
+
+        let keyData = qKeys.data[0..., 0..., .newAxis, 0..., 0...]
+        let keyScales = qKeys.scales[0..., 0..., .newAxis, 0..., 0...]
+        let keyBiases = qKeys.biases[0..., 0..., .newAxis, 0..., 0...]
+        var scores = quantizedMatmul(
+            rotatedQueries, keyData, scales: keyScales, biases: keyBiases, transpose: true,
+            groupSize: groupSize, bits: bits)
+
+        if let mask {
+            scores = scores + mask
+        }
+
+        let weights = softmax(scores, axis: -1, precise: true)
+        let valueData = qValues.data[0..., 0..., .newAxis, 0..., 0...]
+        let valueScales = qValues.scales[0..., 0..., .newAxis, 0..., 0...]
+        let valueBiases = qValues.biases[0..., 0..., .newAxis, 0..., 0...]
+        var output = quantizedMatmul(
+            weights, valueData, scales: valueScales, biases: valueBiases, transpose: false,
+            groupSize: groupSize, bits: bits)
+        if let rotationMatrix {
+            output = output.matmul(rotationMatrix)
+        }
+        return output.reshaped(B, queryHeads, querySteps, headDim)
+    }
+
     func createAttentionMask(h: MLXArray) -> MLXArray? {
         let t = h.dim(1)
         if t > 1 {

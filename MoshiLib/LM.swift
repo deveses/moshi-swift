@@ -6,6 +6,16 @@ import MLX
 import MLXFast
 import MLXNN
 
+private func logicalByteCount(_ array: MLXArray) -> Int {
+    max(array.nbytes, array.shape.reduce(array.dtype.size, *))
+}
+
+private func kvCacheByteCount(_ caches: [KVCache]) -> Int {
+    caches.reduce(0) { total, cache in
+        total + cache.innerState().reduce(0) { $0 + logicalByteCount($1) }
+    }
+}
+
 public struct DepformerConfig {
     var transformer: TransformerConfig
     var numSlices: Int
@@ -32,7 +42,10 @@ class Depformer: Module {
     let transformerCache: [KVCache]
     @ModuleInfo(key: "slices") var slices: [DepformerSlice]
 
-    public init(_ cfg: LmConfig, _ cfgDepformer: DepformerConfig, bSize: Int) {
+    public init(
+        _ cfg: LmConfig, _ cfgDepformer: DepformerConfig, bSize: Int,
+        useTurboQuant: Bool = false
+    ) {
         self.cfg = cfg
         let slices = (0..<cfgDepformer.numSlices).map { idx in
             DepformerSlice(
@@ -42,15 +55,14 @@ class Depformer: Module {
                 cfg: cfgDepformer.transformer)
         }
         self._slices.wrappedValue = slices
-        self.transformerCache = slices[0].transformer.makeCache(bSize: bSize)
+        self.transformerCache = slices[0].transformer.makeCache(
+            bSize: bSize, useTurboQuant: useTurboQuant)
     }
 
     public func sample(
         mainTransformerOut: MLXArray, stepIdx: Int, sampler: Sampler, textToken: MLXArray
     ) -> MLXArray {
-        for c in self.transformerCache {
-            c.reset()
-        }
+        resetCache()
         var lastToken = textToken
         var tokens: [MLXArray] = []
         for (sliceIdx, slice) in slices.enumerated() {
@@ -64,6 +76,16 @@ class Depformer: Module {
             tokens.append(lastToken)
         }
         return concatenated(tokens)
+    }
+
+    public func kvCacheMemoryBytes() -> Int {
+        kvCacheByteCount(transformerCache)
+    }
+
+    public func resetCache() {
+        for cache in transformerCache {
+            cache.reset()
+        }
     }
 }
 
@@ -258,10 +280,12 @@ public class LM: Module {
     @ModuleInfo(key: "text_linear") var textLinear: Linear
     @ModuleInfo(key: "audio_embs") var audioEmbs: [Embedding]
 
-    public init(_ cfg: LmConfig, bSize: Int) {
+    public init(_ cfg: LmConfig, bSize: Int, useTurboQuant: Bool = false) {
         self.cfg = cfg
         self._transformer.wrappedValue = Transformer(cfg.transformer)
-        self._depformer.wrappedValue = cfg.depformer.map { Depformer(cfg, $0, bSize: bSize) }
+        self._depformer.wrappedValue = cfg.depformer.map {
+            Depformer(cfg, $0, bSize: bSize, useTurboQuant: useTurboQuant)
+        }
         self._textEmb.wrappedValue = Embedding(
             embeddingCount: cfg.textInVocabSize, dimensions: cfg.transformer.dModel)
         self._outNorm.wrappedValue =
@@ -275,7 +299,8 @@ public class LM: Module {
         self._audioEmbs.wrappedValue = (0..<cfg.audioCodebooks).map { _ in
             Embedding(embeddingCount: cfg.audioVocabSize, dimensions: cfg.transformer.dModel)
         }
-        self.transformerCache = self._transformer.wrappedValue.makeCache(bSize: bSize)
+        self.transformerCache = self._transformer.wrappedValue.makeCache(
+            bSize: bSize, useTurboQuant: useTurboQuant)
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -288,6 +313,12 @@ public class LM: Module {
         for cache in self.transformerCache {
             cache.reset()
         }
+        depformer?.resetCache()
+    }
+
+    public func kvCacheMemoryBytes() -> Int {
+        let mainBytes = kvCacheByteCount(transformerCache)
+        return mainBytes + (depformer?.kvCacheMemoryBytes() ?? 0)
     }
 
     public func stepMain(textIds: MLXArray?, audioIds: [MLXArray]) -> (MLXArray, MLXArray) {
@@ -346,9 +377,7 @@ public class LM: Module {
             audioSampler: sampler, cb: EmptyCallbacks())
         eval(textToken)
         eval(audioTokens)
-        for c in self.transformerCache {
-            c.reset()
-        }
+        resetCache()
     }
 }
 
