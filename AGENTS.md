@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
 ## Project
 
@@ -48,7 +48,7 @@ Three Xcode targets live side by side:
 The library is organized by model component, not by model variant — variants are just different `LmConfig`/`MimiConfig` values composed from the same building blocks:
 
 - `Transformer.swift` — generic causal transformer used everywhere; `TransformerConfig` controls dims, RoPE, gating, KV-cache rotation, etc.
-- `KVCache.swift` — KV caches, including a rotating variant used by Mimi's transformer.
+- `KVCache.swift` — KV caches, including the rotating variant used by Mimi's transformer and the TurboQuant KV-cache implementation used by the app toggle.
 - `Conv.swift`, `Seanet.swift` — streaming 1D convolutions and the SEANet encoder/decoder used by Mimi.
 - `Mimi.swift` — streaming neural audio codec. `MimiConfig.mimi_2024_07(numCodebooks:)` is the canonical config; `encodeStep`/`decodeStep` operate on `StreamArray` for true streaming.
 - `LM.swift` — top-level `LM` module plus `Depformer` (per-codebook hierarchical sampler) and `LMGen` (generation loop). One `LM` class serves Moshi, Helium, and ASR; the variant is determined by `LmConfig` (`moshi1b`, `moshi_2024_07`, `helium2b`, `asr300m`/`asr1b`/`asr2b`).
@@ -57,6 +57,22 @@ The library is organized by model component, not by model variant — variants a
 - `Streaming.swift` — `StreamArray`, the optional-`MLXArray` wrapper used to thread "no data this step" through the pipeline.
 - `Quantization.swift` — `quantize(model:groupSize:bits:)` applied based on weight-file suffix (`.q4/.q6/.q8.safetensors`) before parameter loading.
 - `Perf.swift`, `Utils.swift` — timing/perf-stats helpers and utilities.
+
+### TurboQuant KV cache notes
+
+The SwiftUI app can load Moshi/ASR with a TurboQuant KV cache toggle in `Moshi/ModelView.swift`. The flag is threaded through `Evaluator.load`, `makeMoshi`, `LM`, `Depformer`, and `Transformer.makeCache`.
+
+The current Swift TurboQuant path is a conservative 4-bit MLX-native affine cache in `KVCache.swift`. It uses QR rotation, QR sign correction, and per-token normalization with norms baked into quantized scales/biases. The reference implementation lives outside this repo at `/Users/slawomirstrumecki/Work/gh/deveses/turboquant-mlx`; use it as the source of truth when changing the algorithm. Do not switch the app default back to 3-bit unless QJL or equivalent quality protection is implemented.
+
+When resetting an `LM`, reset both the main transformer cache and the depformer cache. Warmup must leave caches empty before real generation starts.
+
+The app's Device tab displays KV cache memory through `LM.kvCacheMemoryBytes()`, using the cache arrays' logical shape and dtype size as a fallback when MLX reports zero bytes for lazy arrays.
+
+### SwiftUI app notes
+
+The stats panel in `ModelView.swift` intentionally uses one segmented `Picker` plus a `switch` over the selected page. Avoid nesting a `TabView` inside the custom stats panel; on macOS it adds native tab chrome and makes the panel look broken.
+
+On macOS, closing the last window should quit the app. This behavior is implemented with an `NSApplicationDelegate` in `Moshi/moshiApp.swift`.
 
 ### Audio plumbing (CLI)
 

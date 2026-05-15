@@ -325,57 +325,39 @@ struct CombinedStatsView: View {
     @State private var isExpanded = true
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header with page indicator and collapse button
-            ZStack {
-                // Left-aligned content
-                HStack {
-                    if isExpanded {
-                        HStack(spacing: 16) {
-                            ForEach(0..<3) { index in
-                                Button(action: { withAnimation { currentPage = index } }) {
-                                    let text = switch index {
-                                    case 0: "Model"
-                                    case 1: "Device"
-                                    case 2: "Details"
-                                    case _: "unk"
-                                    }
-                                    VStack(spacing: 4) {
-                                        Text(text)
-                                            .font(.subheadline)
-                                            .foregroundStyle(currentPage == index ? .primary : .secondary)
-                                        Rectangle()
-                                            .fill(currentPage == index ? .blue : .clear)
-                                            .frame(height: 2)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                    } else {
-                        Text("Details")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                if isExpanded {
+                    Picker("Stats Page", selection: $currentPage) {
+                        Text("Model").tag(0)
+                        Text("Device").tag(1)
+                        Text("Details").tag(2)
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360)
+                } else {
+                    Text(tabTitle)
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
                 }
 
-                // Right-aligned button (always in the same position)
-                HStack {
-                    Spacer()
-                    Button(action: {
+                Spacer()
+
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
                         isExpanded.toggle()
-                    }) {
-                        Image(systemName: isExpanded ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
-                            .foregroundStyle(.secondary)
-                            .font(.title3)
                     }
+                }) {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
                 }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
             }
-            .padding(.bottom, isExpanded ? 8 : 0)
-            // Add tap gesture only when collapsed
-            .contentShape(Rectangle()) // Make entire area tappable
+            .contentShape(Rectangle())
             .onTapGesture {
                 if !isExpanded {
                     withAnimation {
@@ -385,28 +367,38 @@ struct CombinedStatsView: View {
             }
 
             if isExpanded {
-                TabView(selection: $currentPage) {
-                    StatsView(summary: summary)
-                        .padding(.vertical)
-                        .frame(height: 250)
-                        .tag(0)
-                    DeviceStatsView(
-                        deviceStat: deviceStat,
-                        kvCacheMemoryBytes: kvCacheMemoryBytes
-                    )
-                        .padding(.vertical)
-                        .tag(1)
-                    DebugView(modelInfo: modelInfo, modelName: modelName, urls: urls)
-                        .padding(.vertical)
-                        .tag(2)
-                }
-                #if os(iOS)
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                #endif
+                content
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(height: isExpanded ? 250 : 44)
+        .frame(minHeight: isExpanded ? 190 : 28, alignment: .top)
         .animation(.easeInOut(duration: 0.2), value: isExpanded)
+    }
+
+    private var tabTitle: String {
+        switch currentPage {
+        case 0: "Model"
+        case 1: "Device"
+        case 2: "Details"
+        default: "Stats"
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch currentPage {
+        case 0:
+            StatsView(summary: summary)
+        case 1:
+            DeviceStatsView(
+                deviceStat: deviceStat,
+                kvCacheMemoryBytes: kvCacheMemoryBytes
+            )
+        case 2:
+            DebugView(modelInfo: modelInfo, modelName: modelName, urls: urls)
+        default:
+            EmptyView()
+        }
     }
 }
 

@@ -4,6 +4,7 @@
 - reset depformer KV cache together with the main transformer cache
 - improved TurboQuant cache quality with rotation sign correction, normalization, and 4-bit default
 - changed macOS behavior to quit the app when the last window is closed
+- cleaned up the app stats panel by replacing the nested tab view with a single segmented control
 
 ## 2026-05-10
 - added q8, q16 and bf16 model selection
