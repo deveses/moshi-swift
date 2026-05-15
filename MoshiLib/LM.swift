@@ -366,7 +366,9 @@ public class LM: Module {
         }
     }
 
-    public func warmup() {
+    public func warmup(_ mode: WarmupMode = .full) {
+        // `.minimal` has no smaller workload to offer here — the warmup is already a single token.
+        if mode == .none { return }
         let sampler = Sampler()
         let textIds = MLXArray.zeros([1, 1], dtype: .int32)
         let audioIds = (0..<self.cfg.depformerSlices()).map { _ in

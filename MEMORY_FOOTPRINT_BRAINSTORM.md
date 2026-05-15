@@ -382,6 +382,13 @@ Trying to make full BF16 large Moshi run comfortably on 8 GB may be unrealistic 
 
 All numbers below are back-of-envelope from the `v1_7b` config (32 layers × 32 heads × 128 head dim × context 3000, ~7B params) and `moshi_2024_07` (16 audio codebooks, 32k text vocab). They should be replaced by Phase 0 measurements before committing to any phase.
 
+> **Measured 2026-05-15** — see [MEMORY_BASELINE_2026-05-15.md](MEMORY_BASELINE_2026-05-15.md). Key corrections:
+>
+> - **§3 ("Reduce Main Transformer Context") saves 0 GB on its own.** `KVCacheSimple` allocates in 256-step chunks up to `maxSeqLen`, so the `context` field only bounds attention reads, not allocation. To reduce KV memory you need §4 (RotatingKVCache) or §5 (TurboQuant).
+> - **§1 ("Avoid Loading Duplicate Weight Copies") saves ~0 GB.** Resident memory stays <50 MB until `eval(model)`, indicating `loadArrays` is mmap'd. The transient dictionaries cost nothing measurable.
+> - Total q8 steady-state ~**8.00 GB** (vs. ~10 GB estimated). The dominant cost is weights (7.64 GB); KV at 134 MB at step 100, ~1.5 GB at step 3000.
+> - Activations / transient MLX buffers ~**150 MB** (vs. 0.5–1 GB estimated).
+
 ### Baseline q8 footprint (approximate)
 
 | Component | Approx size |
@@ -399,11 +406,12 @@ On an 8 GB Mac q8 is over-budget even before the startup spike — that is the g
 
 | Lever | Targets | Approx savings | Notes |
 | --- | --- | --- | --- |
-| §3 Reduce context 3000 → 1024 | main KV | ~1.0 GB | Linear; 1536 saves ~0.8 GB, 512 saves ~1.3 GB |
-| §5 TurboQuant KV (3-bit, already built) | main KV | ~0.4–1.2 GB | Stacks with §3 multiplicatively |
+| §3 Reduce context 3000 → 1024 | main KV | **0 GB on its own (measured)** | `KVCacheSimple` allocates in step-chunks regardless of context; pair with §4 |
+| §4 RotatingKVCache for main LM | main KV | up to ~1.4 GB at step 3000 | Caps allocation at `context` slots; at step 100 the saving is ~0 |
+| §5 TurboQuant KV (3-bit, already built) | main KV | ~0.1 GB at step 100, ~1.2 GB at step 3000 | Stacks with §3+§4. Quality validation pending |
 | §6 Mixed precision (q4 bulk + q8 sensitive) | weights | ~2.0–2.4 GB | Biggest weight win. Requires offline conversion (§12); cannot be done at runtime against the stock q8 checkpoint |
-| §1/§2 Release intermediate weight dicts | startup peak | ~0.3–1 GB peak only | Doesn't affect steady-state; verify whether `loadArrays` already mmaps |
-| §8 Skip/shrink warmup | startup peak | ~0.2–0.5 GB peak | Cost: first tokens slower |
+| §1/§2 Release intermediate weight dicts | startup peak | **~0 GB (measured)** | `loadArrays` is mmap'd; dicts cost nothing. Keep only the CLI load-order swap as a consistency fix |
+| §8 Skip/shrink warmup | startup peak | ~0.3 GB MLX cache | Cost: first tokens slower |
 | §7 Defer Mimi until audio starts | startup peak | ~0.3–0.5 GB | Useful for load-only diagnostic mode |
 | §9 `MLX.GPU.set(cacheLimit:)` | transient | ~0.1–0.3 GB | Trades latency for memory |
 | §10 No trace/token retention | runtime | ~0.05–0.2 GB | Grows with session length |

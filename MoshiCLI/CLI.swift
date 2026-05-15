@@ -82,6 +82,24 @@ public enum Config: String, CaseIterable, ExpressibleByArgument {
     case moshi7b
 }
 
+struct MemlogOptions: ParsableArguments {
+    @Option(help: "if set, write per-phase memory snapshots as JSON Lines to this path")
+    var memlog: String?
+
+    func install() throws {
+        guard let memlog else { return }
+        MemoryLog.shared.sink = try JSONLinesMemorySink(path: memlog)
+        MemoryLog.shared.snapshot("before-download")
+    }
+}
+
+extension WarmupMode: ExpressibleByArgument {}
+
+struct WarmupOptions: ParsableArguments {
+    @Option(help: "warmup mode: full | minimal | none (default: full)")
+    var warmup: WarmupMode = .full
+}
+
 struct Run: ParsableCommand {
     @Argument(help: "the model to run")
     var model: String
@@ -101,22 +119,37 @@ struct Run: ParsableCommand {
     @Option(help: "the Mimi codec checkpoint to use")
     var mimiModel: String = defaultMimiModel
 
+    @Option(help: "override main transformer context (default: config-provided)")
+    var mainContext: Int?
+
+    @OptionGroup var memlogOptions: MemlogOptions
+    @OptionGroup var warmupOptions: WarmupOptions
+
     mutating func run() throws {
+        try memlogOptions.install()
         let model = try maybeDownloadFromHub(filename: model)
-        let cfg =
+        var cfg =
             switch config {
             case .moshi1b: LmConfig.moshi1b(audioDelay: audioDelay)
             case .moshi7b: LmConfig.moshi_2024_07()
             }
+        if let mainContext {
+            cfg.transformer.context = mainContext
+        }
 
         switch input {
         case .none:
-            try runMoshi(model, cfg: cfg, audioFile: nil, mimiModel: mimiModel)
-        case .some("mic"): try runMoshiMic(model, cfg: cfg, mimiModel: mimiModel)
+            try runMoshi(
+                model, cfg: cfg, audioFile: nil, mimiModel: mimiModel,
+                warmup: warmupOptions.warmup)
+        case .some("mic"):
+            try runMoshiMic(
+                model, cfg: cfg, mimiModel: mimiModel, warmup: warmupOptions.warmup)
         case .some(let input):
             let audioFile = URL(fileURLWithPath: input)
             try runMoshi(
-                model, cfg: cfg, audioFile: audioFile, channel: channel, mimiModel: mimiModel)
+                model, cfg: cfg, audioFile: audioFile, channel: channel, mimiModel: mimiModel,
+                warmup: warmupOptions.warmup)
         }
     }
 }
@@ -210,7 +243,11 @@ struct RunHelium: ParsableCommand {
     @Option(help: "the config")
     var config: HeliumConfig = .q4
 
+    @OptionGroup var memlogOptions: MemlogOptions
+    @OptionGroup var warmupOptions: WarmupOptions
+
     mutating func run() throws {
+        try memlogOptions.install()
         let cfg = LmConfig.helium2b()
         let filename =
             switch config {
@@ -220,7 +257,7 @@ struct RunHelium: ParsableCommand {
             case .bf16: "helium-1-preview-2b-bf16.safetensors"
             }
         let url = try downloadFromHub(id: "kyutai/helium-1-preview-2b-mlx", filename: filename)
-        try runHelium(url, cfg: cfg)
+        try runHelium(url, cfg: cfg, warmup: warmupOptions.warmup)
     }
 }
 
@@ -249,7 +286,11 @@ struct RunAsr: ParsableCommand {
     @Option(help: "the audio channel from the input file to be used")
     var channel: Int = 0
 
+    @OptionGroup var memlogOptions: MemlogOptions
+    @OptionGroup var warmupOptions: WarmupOptions
+
     mutating func run() throws {
+        try memlogOptions.install()
         let model = try maybeDownloadFromHub(filename: model)
         let weights = try loadArrays(url: model)
         let cfg =
@@ -263,11 +304,13 @@ struct RunAsr: ParsableCommand {
         print("here2")
         switch input {
         case .none:
-            try runAsr(model, cfg, audioFile: nil, channel: channel)
-        case .some("mic"): try runAsrMic(model, cfg)
+            try runAsr(
+                model, cfg, audioFile: nil, channel: channel, warmup: warmupOptions.warmup)
+        case .some("mic"): try runAsrMic(model, cfg, warmup: warmupOptions.warmup)
         case .some(let input):
             let audioFile = URL(fileURLWithPath: input)
-            try runAsr(model, cfg, audioFile: audioFile, channel: channel)
+            try runAsr(
+                model, cfg, audioFile: audioFile, channel: channel, warmup: warmupOptions.warmup)
         }
     }
 }

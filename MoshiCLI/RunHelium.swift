@@ -10,7 +10,9 @@ import MoshiLib
 
 func makeHelium(_ url: URL, _ cfg: LmConfig) throws -> LM {
     let weights = try loadArrays(url: url)
+    MemoryLog.shared.snapshot("after-loadArrays-moshi")
     let parameters = ModuleParameters.unflattened(weights)
+    MemoryLog.shared.snapshot("after-unflatten-moshi")
     let model = LM(cfg, bSize: 1)
     if url.lastPathComponent.hasSuffix("q4.safetensors") {
         quantize(model: model, groupSize: 64, bits: 4)
@@ -19,16 +21,21 @@ func makeHelium(_ url: URL, _ cfg: LmConfig) throws -> LM {
     } else if url.lastPathComponent.hasSuffix("q8.safetensors") {
         quantize(model: model, groupSize: 64, bits: 8)
     }
+    MemoryLog.shared.snapshot("after-quantize-moshi")
     try model.update(parameters: parameters, verify: [.all])
+    MemoryLog.shared.snapshot("after-update-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
     eval(model)
+    MemoryLog.shared.snapshot("after-eval-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
     return model
 }
 
-func runHelium(_ url: URL, cfg: LmConfig) throws {
+func runHelium(_ url: URL, cfg: LmConfig, warmup: WarmupMode = .full) throws {
     let stats = PerfStats()
     let helium = try makeHelium(url, cfg)
     let vocab = try loadVocab(cfg)
-    helium.warmup()
+    MemoryLog.shared.snapshot("after-loadVocab")
+    helium.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-moshi", kvCacheBytes: helium.kvCacheMemoryBytes())
     print("done warming up")
 
     let maxSteps = helium.cfg.transformer.maxSeqLen
@@ -51,5 +58,8 @@ func runHelium(_ url: URL, cfg: LmConfig) throws {
             }
         }
         lastToken = textToken
+        if stepIdx == 100 {
+            MemoryLog.shared.snapshot("after-step-100", kvCacheBytes: helium.kvCacheMemoryBytes())
+        }
     }
 }

@@ -28,6 +28,7 @@ struct MoshiModelPreset {
     let localResourceName: String?
     let mimiRepo: String
     let mimiFilename: String
+    let estimatedSteadyStateBytes: Int
 }
 
 enum ModelSelect: String, CaseIterable, Identifiable {
@@ -100,7 +101,8 @@ enum ModelSelect: String, CaseIterable, Identifiable {
                 modelFilename: "moshi-37c6cfd6@200.q6.safetensors",
                 localResourceName: "moshi-37c6cfd6@200.q6",
                 mimiRepo: "lmz/moshi-swift",
-                mimiFilename: "tokenizer-dbaa9758-checkpoint125.safetensors")
+                mimiFilename: "tokenizer-dbaa9758-checkpoint125.safetensors",
+                estimatedSteadyStateBytes: 1_879_048_192)
         case .moshiQ4:
             return MoshiModelPreset(
                 name: "Moshi q4",
@@ -109,7 +111,8 @@ enum ModelSelect: String, CaseIterable, Identifiable {
                 modelFilename: "model.q4.safetensors",
                 localResourceName: nil,
                 mimiRepo: "kyutai/moshika-mlx-q4",
-                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors")
+                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors",
+                estimatedSteadyStateBytes: 5_240_443_174)
         case .moshiQ8:
             return MoshiModelPreset(
                 name: "Moshi q8",
@@ -118,7 +121,8 @@ enum ModelSelect: String, CaseIterable, Identifiable {
                 modelFilename: "model.q8.safetensors",
                 localResourceName: nil,
                 mimiRepo: "kyutai/moshika-mlx-q8",
-                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors")
+                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors",
+                estimatedSteadyStateBytes: 8_589_934_592)
         case .moshiBf16:
             return MoshiModelPreset(
                 name: "Moshi BF16",
@@ -127,7 +131,8 @@ enum ModelSelect: String, CaseIterable, Identifiable {
                 modelFilename: "model.safetensors",
                 localResourceName: nil,
                 mimiRepo: "kyutai/moshika-mlx-bf16",
-                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors")
+                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors",
+                estimatedSteadyStateBytes: 15_032_385_536)
         default:
             return nil
         }
@@ -252,7 +257,9 @@ class Evaluator {
 
     func makeMoshi(_ url: URL, _ cfg: LmConfig, useTurboQuant: Bool = false) throws -> LM {
         let weights = try loadArrays(url: url)
+        MemoryLog.shared.snapshot("after-loadArrays-moshi")
         let parameters = ModuleParameters.unflattened(weights)
+        MemoryLog.shared.snapshot("after-unflatten-moshi")
         let model = LM(cfg, bSize: 1, useTurboQuant: useTurboQuant)
         if url.lastPathComponent.hasSuffix(".q4.safetensors") {
             quantize(model: model, groupSize: 32, bits: 4)
@@ -261,14 +268,19 @@ class Evaluator {
         } else if url.lastPathComponent.hasSuffix(".q8.safetensors") {
             quantize(model: model, groupSize: 64, bits: 8)
         }
+        MemoryLog.shared.snapshot("after-quantize-moshi")
         try model.update(parameters: parameters, verify: [.all])
+        MemoryLog.shared.snapshot("after-update-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
         eval(model)
+        MemoryLog.shared.snapshot("after-eval-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
         return model
     }
 
     func makeHelium(_ url: URL, _ cfg: LmConfig) throws -> LM {
         let weights = try loadArrays(url: url)
+        MemoryLog.shared.snapshot("after-loadArrays-moshi")
         let parameters = ModuleParameters.unflattened(weights)
+        MemoryLog.shared.snapshot("after-unflatten-moshi")
         let model = LM(cfg, bSize: 1)
         if url.lastPathComponent.hasSuffix("q4.safetensors") {
             quantize(model: model, groupSize: 64, bits: 4)
@@ -277,8 +289,11 @@ class Evaluator {
         } else if url.lastPathComponent.hasSuffix("q8.safetensors") {
             quantize(model: model, groupSize: 64, bits: 8)
         }
+        MemoryLog.shared.snapshot("after-quantize-moshi")
         try model.update(parameters: parameters, verify: [.all])
+        MemoryLog.shared.snapshot("after-update-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
         eval(model)
+        MemoryLog.shared.snapshot("after-eval-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
         return model
     }
 
@@ -304,6 +319,7 @@ class Evaluator {
 
         let url = try await downloadFromHub(id: repoID, filename: filename)
         let origWeights = try loadArrays(url: url)
+        MemoryLog.shared.snapshot("after-loadArrays-mimi")
         var weights: [String: MLXArray] = [:]
         for (var key, var weight) in origWeights {
             // Mutating the keys while iterating over the map seems pretty dodgy, not sure what the idiomatic
@@ -357,6 +373,7 @@ class Evaluator {
         }
         let parameters = ModuleParameters.unflattened(weights)
         try model.update(parameters: parameters, verify: [.all])
+        MemoryLog.shared.snapshot("after-update-mimi")
         return model
     }
 
@@ -364,7 +381,9 @@ class Evaluator {
         self.shouldStop.store(true, ordering: .relaxed)
     }
 
-    func generate(_ sm: ModelSelect, useTurboQuant: Bool = false) async {
+    func generate(
+        _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full
+    ) async {
         guard !running else { return }
 
         self.shouldStop.store(false, ordering: .relaxed)
@@ -374,7 +393,7 @@ class Evaluator {
         self.kvCacheMemoryBytes = 0
         running = true
         do {
-            let model = try await load(sm, useTurboQuant: useTurboQuant)
+            let model = try await load(sm, useTurboQuant: useTurboQuant, warmup: warmup)
             let urls = try await model.perform { model in
                 model.reset()
                 await self.cb.onReset()
@@ -458,7 +477,9 @@ class Evaluator {
         running = false
     }
 
-    func load(_ sm: ModelSelect, useTurboQuant: Bool = false) async throws -> ModelState {
+    func load(
+        _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full
+    ) async throws -> ModelState {
         if case .loaded(let m, let loadedModel, let loadedTurboQuant) = self.loadState,
             loadedModel == sm && loadedTurboQuant == useTurboQuant
         {
@@ -474,13 +495,14 @@ class Evaluator {
                 throw CustomError("missing Moshi preset for \(sm.name)")
             }
             let model = try await MoshiModel(
-                self, self.cb, preset: preset, useTurboQuant: useTurboQuant)
+                self, self.cb, preset: preset, useTurboQuant: useTurboQuant, warmup: warmup)
             m = ModelState(model)
         case .mimi:
             let model = try await MimiModel(self, self.cb)
             m = ModelState(model)
         case .asr:
-            let model = try await AsrModel(self, self.cb, useTurboQuant: useTurboQuant)
+            let model = try await AsrModel(
+                self, self.cb, useTurboQuant: useTurboQuant, warmup: warmup)
             m = ModelState(model)
         case .helium:
             let model = try await HeliumModel(self, self.cb)
@@ -682,12 +704,17 @@ struct HeliumModel: Model {
 
 struct AsrModel: Model {
     var asr: ASR
+    var chunksSeen: Int = 0
 
     init(_ ev: Evaluator, _ cb: Callbacks) async throws {
         try await self.init(ev, cb, useTurboQuant: false)
     }
 
-    init(_ ev: Evaluator, _ cb: Callbacks, useTurboQuant: Bool = false) async throws {
+    init(
+        _ ev: Evaluator, _ cb: Callbacks, useTurboQuant: Bool = false,
+        warmup: WarmupMode = .full
+    ) async throws {
+        MemoryLog.shared.snapshot("before-download")
         await ev.setModelInfo("building model")
         let url: URL
         let localURL = Bundle.main.url(forResource: "stt-model", withExtension: "safetensors")
@@ -703,10 +730,13 @@ struct AsrModel: Model {
         let mimi = try await ev.makeMimi(numCodebooks: 32)
         await ev.setModelInfo("model built")
         let vocab = try await ev.loadVocab(cfg)
-        await ev.setModelInfo("warming up mimi")
-        mimi.warmup()
-        await ev.setModelInfo("warming up moshi")
-        moshi.warmup()
+        MemoryLog.shared.snapshot("after-loadVocab")
+        await ev.setModelInfo("warming up mimi (\(warmup.rawValue))")
+        mimi.warmup(warmup)
+        MemoryLog.shared.snapshot("after-warmup-mimi", kvCacheBytes: moshi.kvCacheMemoryBytes())
+        await ev.setModelInfo("warming up moshi (\(warmup.rawValue))")
+        moshi.warmup(warmup)
+        MemoryLog.shared.snapshot("after-warmup-moshi", kvCacheBytes: moshi.kvCacheMemoryBytes())
         await ev.setModelInfo("done warming up")
         self.asr = ASR(moshi, mimi, vocab: vocab, cb: cb)
     }
@@ -728,6 +758,11 @@ struct AsrModel: Model {
                 ev.output += v
             }
         }
+        chunksSeen += 1
+        if chunksSeen == 100 {
+            MemoryLog.shared.snapshot(
+                "after-step-100", kvCacheBytes: asr.kvCacheMemoryBytes())
+        }
         return true
     }
 }
@@ -738,6 +773,7 @@ struct MoshiModel: Model {
     let mimi: Mimi
     let gen: LMGen
     let cb: Callbacks
+    var stepsSeen: Int = 0
 
     init(_ ev: Evaluator, _ cb: Callbacks) async throws {
         guard let preset = ModelSelect.moshi.moshiPreset else {
@@ -748,8 +784,9 @@ struct MoshiModel: Model {
 
     init(
         _ ev: Evaluator, _ cb: Callbacks, preset: MoshiModelPreset,
-        useTurboQuant: Bool = false
+        useTurboQuant: Bool = false, warmup: WarmupMode = .full
     ) async throws {
+        MemoryLog.shared.snapshot("before-download")
         await ev.setModelInfo("building model")
         let url: URL
         let cfg = preset.cfg
@@ -776,10 +813,15 @@ struct MoshiModel: Model {
         self.gen = LMGen(
             moshi, maxSteps: maxSteps, audioSampler: Sampler(), textSampler: Sampler(), cb: self.cb)
         self.vocab = try await ev.loadVocab(cfg)
-        await ev.setModelInfo("warming up mimi")
-        self.mimi.warmup()
-        await ev.setModelInfo("warming up moshi")
-        self.moshi.warmup()
+        MemoryLog.shared.snapshot("after-loadVocab")
+        await ev.setModelInfo("warming up mimi (\(warmup.rawValue))")
+        self.mimi.warmup(warmup)
+        MemoryLog.shared.snapshot(
+            "after-warmup-mimi", kvCacheBytes: self.moshi.kvCacheMemoryBytes())
+        await ev.setModelInfo("warming up moshi (\(warmup.rawValue))")
+        self.moshi.warmup(warmup)
+        MemoryLog.shared.snapshot(
+            "after-warmup-moshi", kvCacheBytes: self.moshi.kvCacheMemoryBytes())
         await ev.setModelInfo("done warming up")
     }
 
@@ -827,6 +869,11 @@ struct MoshiModel: Model {
                     if let p = pcmOut.asArray() {
                         let _ = ap.send(p.asArray(Float.self))
                     }
+                }
+                stepsSeen += 1
+                if stepsSeen == 100 {
+                    MemoryLog.shared.snapshot(
+                        "after-step-100", kvCacheBytes: moshi.kvCacheMemoryBytes())
                 }
             }
         }

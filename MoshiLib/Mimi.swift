@@ -84,8 +84,14 @@ public class Mimi: Module {
         self.decoderCache = self._decoderTransformer.wrappedValue.makeCache(bSize: bSize)
     }
 
-    public func warmup() {
-        let pcm = MLXArray.zeros([1, 1, 1920 * 4])
+    public func warmup(_ mode: WarmupMode = .full) {
+        let pcmSamples: Int
+        switch mode {
+        case .none: return
+        case .minimal: pcmSamples = 1920  // one streaming chunk; still exercises all SEANet stages
+        case .full: pcmSamples = 1920 * 4
+        }
+        let pcm = MLXArray.zeros([1, 1, pcmSamples])
         let codes = self.encode(pcm)
         let pcmOut = self.decode(codes)
         eval(pcmOut)

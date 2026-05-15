@@ -15,6 +15,7 @@ func makeMimi(numCodebooks: Int, modelFilename: String = defaultMimiModel) throw
 
     let url = try maybeDownloadFromHub(filename: modelFilename)
     let origWeights = try loadArrays(url: url)
+    MemoryLog.shared.snapshot("after-loadArrays-mimi")
     var weights: [String: MLXArray] = [:]
     for (var key, var weight) in origWeights {
         // Mutating the keys while iterating over the map seems pretty dodgy, not sure what the idiomatic
@@ -67,6 +68,7 @@ func makeMimi(numCodebooks: Int, modelFilename: String = defaultMimiModel) throw
     }
     let parameters = ModuleParameters.unflattened(weights)
     try model.update(parameters: parameters, verify: [.all])
+    MemoryLog.shared.snapshot("after-update-mimi")
     return model
 }
 

@@ -10,7 +10,9 @@ import MoshiLib
 
 func makeMoshi(_ url: URL, _ cfg: LmConfig) throws -> LM {
     let weights = try loadArrays(url: url)
+    MemoryLog.shared.snapshot("after-loadArrays-moshi")
     let parameters = ModuleParameters.unflattened(weights)
+    MemoryLog.shared.snapshot("after-unflatten-moshi")
     let model = LM(cfg, bSize: 1)
     if url.lastPathComponent.hasSuffix(".q4.safetensors") {
         quantize(model: model, groupSize: 32, bits: 4)
@@ -19,8 +21,11 @@ func makeMoshi(_ url: URL, _ cfg: LmConfig) throws -> LM {
     } else if url.lastPathComponent.hasSuffix(".q8.safetensors") {
         quantize(model: model, groupSize: 64, bits: 8)
     }
+    MemoryLog.shared.snapshot("after-quantize-moshi")
     try model.update(parameters: parameters, verify: [.all])
+    MemoryLog.shared.snapshot("after-update-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
     eval(model)
+    MemoryLog.shared.snapshot("after-eval-moshi", kvCacheBytes: model.kvCacheMemoryBytes())
     return model
 }
 
@@ -39,15 +44,21 @@ func loadVocab(_ cfg: LmConfig) throws -> [Int: String] {
     return dictionary
 }
 
-func runMoshiMic(_ url: URL, cfg: LmConfig, mimiModel: String = defaultMimiModel) throws {
-    let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
+func runMoshiMic(
+    _ url: URL, cfg: LmConfig, mimiModel: String = defaultMimiModel,
+    warmup: WarmupMode = .full
+) throws {
     let moshi = try makeMoshi(url, cfg)
+    let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
     let vocab = try loadVocab(cfg)
+    MemoryLog.shared.snapshot("after-loadVocab")
     print("using device \(Device.defaultDevice().description)")
-    print("warming up mimi")
-    mimi.warmup()
-    print("warming up moshi")
-    moshi.warmup()
+    print("warming up mimi (\(warmup.rawValue))")
+    mimi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-mimi", kvCacheBytes: moshi.kvCacheMemoryBytes())
+    print("warming up moshi (\(warmup.rawValue))")
+    moshi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-moshi", kvCacheBytes: moshi.kvCacheMemoryBytes())
     print("done warming up")
 
     let maxSteps = moshi.cfg.transformer.maxSeqLen
@@ -59,6 +70,7 @@ func runMoshiMic(_ url: URL, cfg: LmConfig, mimiModel: String = defaultMimiModel
     try player.startPlaying()
     print("started the audio loops")
 
+    var totalSteps = 0
     while let pcm = microphoneCapture.receive() {
         let pcm = MLXArray(pcm)[.newAxis, .newAxis]
         let codes = mimi.encodeStep(StreamArray(pcm))
@@ -81,6 +93,11 @@ func runMoshiMic(_ url: URL, cfg: LmConfig, mimiModel: String = defaultMimiModel
                         let _ = player.send(p.asArray(Float.self))
                     }
                 }
+                totalSteps += 1
+                if totalSteps == 100 {
+                    MemoryLog.shared.snapshot(
+                        "after-step-100", kvCacheBytes: moshi.kvCacheMemoryBytes())
+                }
             }
         }
     }
@@ -93,16 +110,20 @@ func runMoshi(
     cfg: LmConfig,
     audioFile: URL?,
     channel: Int = 0,
-    mimiModel: String = defaultMimiModel
+    mimiModel: String = defaultMimiModel,
+    warmup: WarmupMode = .full
 ) throws {
     let stats = PerfStats()
-    let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
     let moshi = try makeMoshi(url, cfg)
+    let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
     let vocab = try loadVocab(cfg)
-    print("warming up mimi")
-    mimi.warmup()
-    print("warming up moshi")
-    moshi.warmup()
+    MemoryLog.shared.snapshot("after-loadVocab")
+    print("warming up mimi (\(warmup.rawValue))")
+    mimi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-mimi", kvCacheBytes: moshi.kvCacheMemoryBytes())
+    print("warming up moshi (\(warmup.rawValue))")
+    moshi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-moshi", kvCacheBytes: moshi.kvCacheMemoryBytes())
     print("done warming up")
 
     let maxSteps = moshi.cfg.transformer.maxSeqLen
@@ -118,6 +139,7 @@ func runMoshi(
     let chunkSize = 1920
     var pcmOuts: [[Float]] = []
     var allAudioTokens: [MLXArray] = []
+    var totalSteps = 0
     for start in stride(from: 0, to: pcm.count, by: chunkSize) {
         let end = min(start + chunkSize, pcm.count)
         let pcmA = MLXArray(pcm[start..<end])[.newAxis, .newAxis]
@@ -153,6 +175,11 @@ func runMoshi(
                     }
                     stats.onEvent(.endDecode)
                 }
+                totalSteps += 1
+                if totalSteps == 100 {
+                    MemoryLog.shared.snapshot(
+                        "after-step-100", kvCacheBytes: moshi.kvCacheMemoryBytes())
+                }
             }
         }
     }
@@ -167,15 +194,20 @@ func runMoshi(
         outputURL: URL(fileURLWithPath: "moshi-out.wav"))
 }
 
-func runAsr(_ url: URL, _ cfg: LmConfig, audioFile: URL?, channel: Int) throws {
-    let mimi = try makeMimi(numCodebooks: 32)
+func runAsr(
+    _ url: URL, _ cfg: LmConfig, audioFile: URL?, channel: Int, warmup: WarmupMode = .full
+) throws {
     let moshi = try makeMoshi(url, cfg)
+    let mimi = try makeMimi(numCodebooks: 32)
     let vocab = try loadVocab(cfg)
+    MemoryLog.shared.snapshot("after-loadVocab")
     print("using device \(Device.defaultDevice().description)")
-    print("warming up mimi")
-    mimi.warmup()
-    print("warming up moshi")
-    moshi.warmup()
+    print("warming up mimi (\(warmup.rawValue))")
+    mimi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-mimi", kvCacheBytes: moshi.kvCacheMemoryBytes())
+    print("warming up moshi (\(warmup.rawValue))")
+    moshi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-moshi", kvCacheBytes: moshi.kvCacheMemoryBytes())
     print("done warming up")
     let asr = ASR(moshi, mimi, vocab: vocab)
     asr.reset()
@@ -188,6 +220,7 @@ func runAsr(_ url: URL, _ cfg: LmConfig, audioFile: URL?, channel: Int) throws {
     let pcm = readAudioToPCMArray(fileURL: sampleURL, channel: channel)!
     let chunkSize = 1920
     asr.reset()
+    var chunkIdx = 0
     for start in stride(from: 0, to: pcm.count, by: chunkSize) {
         let end = min(start + chunkSize, pcm.count)
         let pcmA = MLXArray(pcm[start..<end])[.newAxis, .newAxis]
@@ -196,19 +229,26 @@ func runAsr(_ url: URL, _ cfg: LmConfig, audioFile: URL?, channel: Int) throws {
             print(token, terminator: "")
             fflush(stdout)
         }
+        chunkIdx += 1
+        if chunkIdx == 100 {
+            MemoryLog.shared.snapshot("after-step-100", kvCacheBytes: moshi.kvCacheMemoryBytes())
+        }
     }
     print()
 }
 
-func runAsrMic(_ url: URL, _ cfg: LmConfig) throws {
-    let mimi = try makeMimi(numCodebooks: 32)
+func runAsrMic(_ url: URL, _ cfg: LmConfig, warmup: WarmupMode = .full) throws {
     let moshi = try makeMoshi(url, cfg)
+    let mimi = try makeMimi(numCodebooks: 32)
     let vocab = try loadVocab(cfg)
+    MemoryLog.shared.snapshot("after-loadVocab")
     print("using device \(Device.defaultDevice().description)")
-    print("warming up mimi")
-    mimi.warmup()
-    print("warming up moshi")
-    moshi.warmup()
+    print("warming up mimi (\(warmup.rawValue))")
+    mimi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-mimi", kvCacheBytes: moshi.kvCacheMemoryBytes())
+    print("warming up moshi (\(warmup.rawValue))")
+    moshi.warmup(warmup)
+    MemoryLog.shared.snapshot("after-warmup-moshi", kvCacheBytes: moshi.kvCacheMemoryBytes())
     print("done warming up")
     let asr = ASR(moshi, mimi, vocab: vocab)
     asr.reset()
@@ -216,12 +256,17 @@ func runAsrMic(_ url: URL, _ cfg: LmConfig) throws {
     let microphoneCapture = MicrophoneCapture()
     microphoneCapture.startCapturing()
 
+    var chunkIdx = 0
     while let pcm = microphoneCapture.receive() {
         let pcm = MLXArray(pcm)[.newAxis, .newAxis]
         let tokens = asr.onPcmInput(pcm)
         for token in tokens {
             print(token, terminator: "")
             fflush(stdout)
+        }
+        chunkIdx += 1
+        if chunkIdx == 100 {
+            MemoryLog.shared.snapshot("after-step-100", kvCacheBytes: moshi.kvCacheMemoryBytes())
         }
     }
     microphoneCapture.stopCapturing()

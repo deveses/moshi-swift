@@ -26,6 +26,16 @@ struct ModelView: View {
     @State var sendToSpeaker = false
     @State private var useTurboQuant = false
     @State private var showSettings = false
+    @State private var memlogEnabled = false
+    @State private var memlogPath: String? = nil
+    @State private var showMemoryWarning = false
+    @State private var warmupMode: WarmupMode = {
+        #if os(iOS)
+            return .minimal
+        #else
+            return .full
+        #endif
+    }()
 
     var body: some View {
         VStack(spacing: 16) {
@@ -91,6 +101,25 @@ struct ModelView: View {
                             Toggle(isOn: $sendToSpeaker) {
                                 Label("Use External Speaker", systemImage: "speaker.wave.2")
                             }
+
+                            Toggle(isOn: $memlogEnabled) {
+                                Label("Log memory snapshots", systemImage: "doc.text.magnifyingglass")
+                            }
+                            .disabled(model.running)
+
+                            if let memlogPath {
+                                Text(memlogPath)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+
+                            Picker("Warmup", selection: $warmupMode) {
+                                Text("Full").tag(WarmupMode.full)
+                                Text("Minimal").tag(WarmupMode.minimal)
+                                Text("None").tag(WarmupMode.none)
+                            }
+                            .disabled(model.running)
                         }
                         .padding()
                         .onChange(of: sendToSpeaker) { (_, newValue) in
@@ -98,6 +127,21 @@ struct ModelView: View {
                                 setDefaultToSpeaker()
                             } else {
                                 setDefaultToStd()
+                            }
+                        }
+                        .onChange(of: memlogEnabled) { (_, newValue) in
+                            if newValue {
+                                let dir = FileManager.default.temporaryDirectory
+                                let name =
+                                    "moshi-memlog-\(Int(Date().timeIntervalSince1970)).jsonl"
+                                let url = dir.appendingPathComponent(name)
+                                if let sink = try? JSONLinesMemorySink(path: url.path) {
+                                    MemoryLog.shared.sink = sink
+                                    memlogPath = url.path
+                                }
+                            } else {
+                                MemoryLog.shared.sink = NoopMemorySink()
+                                memlogPath = nil
                             }
                         }
                         .presentationCompactAdaptation(.popover)
@@ -108,12 +152,37 @@ struct ModelView: View {
         }
         .padding()
         .navigationTitle("Moshi: \(modelType.name)")
+        .alert("This model may not fit on this device.", isPresented: $showMemoryWarning) {
+            Button("Cancel", role: .cancel) {}
+            Button("Load anyway") { startGenerate() }
+        } message: {
+            let needed = modelType.moshiPreset?.estimatedSteadyStateBytes ?? 0
+            let available = MemoryBudget.availableBytes()
+            #if os(macOS)
+                let hint =
+                    "Try low-memory mode, or raise the macOS wired-memory limit with `sudo sysctl iogpu.wired_limit_mb=<MB>`."
+            #else
+                let hint = "Try low-memory mode."
+            #endif
+            Text("Estimated need: \(needed.formattedGB) · Available: \(available.formattedGB).\n\n\(hint)")
+        }
     }
 
     private func generate() {
+        if let preset = modelType.moshiPreset,
+            !MemoryBudget.fitsLikely(estimatedBytes: preset.estimatedSteadyStateBytes)
+        {
+            showMemoryWarning = true
+            return
+        }
+        startGenerate()
+    }
+
+    private func startGenerate() {
         let useTurboQuant = self.useTurboQuant
+        let warmup = self.warmupMode
         Task(priority: .utility) {
-            await model.generate(self.modelType, useTurboQuant: useTurboQuant)
+            await model.generate(self.modelType, useTurboQuant: useTurboQuant, warmup: warmup)
         }
     }
 
