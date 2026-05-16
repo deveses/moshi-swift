@@ -255,7 +255,14 @@ class Evaluator {
         return dictionary
     }
 
-    func makeMoshi(_ url: URL, _ cfg: LmConfig, useTurboQuant: Bool = false) throws -> LM {
+    func makeMoshi(
+        _ url: URL, _ cfg: LmConfig, useTurboQuant: Bool = false,
+        useRotatingKvCache: Bool = false
+    ) throws -> LM {
+        var cfg = cfg
+        if useRotatingKvCache {
+            cfg.transformer.useRotatingKVCache = true
+        }
         let weights = try loadArrays(url: url)
         MemoryLog.shared.snapshot("after-loadArrays-moshi")
         let parameters = ModuleParameters.unflattened(weights)
@@ -382,7 +389,8 @@ class Evaluator {
     }
 
     func generate(
-        _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full
+        _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full,
+        useRotatingKvCache: Bool = false
     ) async {
         guard !running else { return }
 
@@ -393,7 +401,9 @@ class Evaluator {
         self.kvCacheMemoryBytes = 0
         running = true
         do {
-            let model = try await load(sm, useTurboQuant: useTurboQuant, warmup: warmup)
+            let model = try await load(
+                sm, useTurboQuant: useTurboQuant, warmup: warmup,
+                useRotatingKvCache: useRotatingKvCache)
             let urls = try await model.perform { model in
                 model.reset()
                 await self.cb.onReset()
@@ -478,7 +488,8 @@ class Evaluator {
     }
 
     func load(
-        _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full
+        _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full,
+        useRotatingKvCache: Bool = false
     ) async throws -> ModelState {
         if case .loaded(let m, let loadedModel, let loadedTurboQuant) = self.loadState,
             loadedModel == sm && loadedTurboQuant == useTurboQuant
@@ -495,14 +506,16 @@ class Evaluator {
                 throw CustomError("missing Moshi preset for \(sm.name)")
             }
             let model = try await MoshiModel(
-                self, self.cb, preset: preset, useTurboQuant: useTurboQuant, warmup: warmup)
+                self, self.cb, preset: preset, useTurboQuant: useTurboQuant, warmup: warmup,
+                useRotatingKvCache: useRotatingKvCache)
             m = ModelState(model)
         case .mimi:
             let model = try await MimiModel(self, self.cb)
             m = ModelState(model)
         case .asr:
             let model = try await AsrModel(
-                self, self.cb, useTurboQuant: useTurboQuant, warmup: warmup)
+                self, self.cb, useTurboQuant: useTurboQuant, warmup: warmup,
+                useRotatingKvCache: useRotatingKvCache)
             m = ModelState(model)
         case .helium:
             let model = try await HeliumModel(self, self.cb)
@@ -712,7 +725,7 @@ struct AsrModel: Model {
 
     init(
         _ ev: Evaluator, _ cb: Callbacks, useTurboQuant: Bool = false,
-        warmup: WarmupMode = .full
+        warmup: WarmupMode = .full, useRotatingKvCache: Bool = false
     ) async throws {
         MemoryLog.shared.snapshot("before-download")
         await ev.setModelInfo("building model")
@@ -726,7 +739,8 @@ struct AsrModel: Model {
             url = localURL
         }
         let cfg = LmConfig.asr1b()
-        let moshi = try await ev.makeMoshi(url, cfg, useTurboQuant: useTurboQuant)
+        let moshi = try await ev.makeMoshi(
+            url, cfg, useTurboQuant: useTurboQuant, useRotatingKvCache: useRotatingKvCache)
         let mimi = try await ev.makeMimi(numCodebooks: 32)
         await ev.setModelInfo("model built")
         let vocab = try await ev.loadVocab(cfg)
@@ -784,7 +798,8 @@ struct MoshiModel: Model {
 
     init(
         _ ev: Evaluator, _ cb: Callbacks, preset: MoshiModelPreset,
-        useTurboQuant: Bool = false, warmup: WarmupMode = .full
+        useTurboQuant: Bool = false, warmup: WarmupMode = .full,
+        useRotatingKvCache: Bool = false
     ) async throws {
         MemoryLog.shared.snapshot("before-download")
         await ev.setModelInfo("building model")
@@ -800,7 +815,8 @@ struct MoshiModel: Model {
         case .some(let localURL):
             url = localURL
         }
-        self.moshi = try await ev.makeMoshi(url, cfg, useTurboQuant: useTurboQuant)
+        self.moshi = try await ev.makeMoshi(
+            url, cfg, useTurboQuant: useTurboQuant, useRotatingKvCache: useRotatingKvCache)
         let quantizationName = useTurboQuant ? "TurboQuant KV" : "standard KV"
         await ev.setModelName("\(preset.name): \(url.lastPathComponent) (\(quantizationName))")
         self.mimi = try await ev.makeMimi(

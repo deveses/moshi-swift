@@ -123,6 +123,42 @@ Findings:
 
 Conclusion: Task 04's value on tight machines is ~216 MB of peak MLX cache (with `--warmup none`) — smaller than the brainstorm's §8 estimate of "0.2–0.5 GB peak" but in the same range. Useful on iOS where the per-process budget is tighter; less impactful on macOS.
 
+## Rotating KV cache sweep (q8 large, Task 06)
+
+13× repeated bria sample → ~2119 generation steps. Snapshots at steps 100, 256, 512, 1024, 2048. JSONL in [measurements/2026-05-15-rotating-fixed/](measurements/2026-05-15-rotating-fixed/) (post dtype-fix).
+
+| Config | Wrap? | KV @ step 1024 | KV @ step 2048 | Final KV | Output coherence |
+| --- | --- | --- | --- | --- | --- |
+| Simple, ctx 3000 (baseline) | n/a | 512 MiB (4 chunks) | 1024 MiB (8 chunks) | 1542 MiB | coherent (repetitive) |
+| Rotating, ctx 3000 | no (steps < 3000) | 1506 MiB | 1506 MiB | 1506 MiB | coherent |
+| Rotating, ctx 2048 | yes after step 2048 | 1030 MiB | 1030 MiB | 1030 MiB | **degrades after wrap** |
+| Rotating, ctx 1024 | yes after step 1024 | 518 MiB | 518 MiB | 518 MiB | **garbled soon after wrap** |
+
+Two issues surfaced during this sweep:
+
+### Dtype over-allocation (fixed)
+
+The initial run of rotating ctx=1024 reported ~1036 MB instead of the expected ~512 MiB. Root cause: [Transformer.swift:325-328](MoshiLib/Transformer.swift#L325-L328) was reading the dtype from `selfAttn.inProj.weight.dtype`, which for a quantized model is the *storage* dtype (`uint32`, 4 bytes/element) rather than the *compute* dtype (`bf16`, 2 bytes/element). Fix: hardcode `bfloat16` for the RotatingKVCache allocation. Re-measured numbers above are post-fix.
+
+### Wrap-correctness bug (unfixed)
+
+`RotatingKVCache` produces garbled output once the buffer wraps (i.e., once `offset > maxSize`). The brainstorm's caveat — "the causal mask and offset semantics must be checked carefully for the main LM" — is real. The no-wrap case (ctx=3000 with ~2119 steps) produces normal English dialogue, identical in character to the simple-cache baseline. The wrap case (ctx=1024 wraps at step ~1024) starts degrading shortly after the wrap point.
+
+Likely suspects (not yet diagnosed):
+
+- In-place slice assignment `self.keys[..., currentOffset..<tMax] = ...` in `RotatingKVCache.update` may not be propagating the write through MLX's lazy evaluation graph the way the index-read assumes.
+- RoPE position-offset interaction with the rotated buffer layout (each cell now carries the rotation at its *original* position, not its current buffer index — algorithmically this is correct but subtle, easy to get wrong by one).
+- The always-on attention mask for `t == 1` in the rotating path (KVCacheSimple short-circuits this case).
+
+A follow-up task ([09](tasks/09-rotating-kv-cache-wrap-fix.md)) tracks the correctness fix. Until it lands, rotating cache should not be advertised as a memory-reduction lever for long sessions — only as a no-wrap pre-allocation alternative for sessions known to stay under `context` steps.
+
+### What ships from Task 06
+
+- `--main-context N` and `--rotating-kv-cache` CLI flags on `Run`; `--repeat-input N` for measurement; multi-step snapshot milestones in the CLI.
+- App toggle in [Moshi/ModelView.swift](Moshi/ModelView.swift) (mutually exclusive with TurboQuant).
+- Dtype fix in `Transformer.makeCache` — gives a real 2× cut for the rotating allocation on quantized models.
+- The wrap-correctness bug as a documented follow-up.
+
 ## Missing
 
 - **BF16 large** — deferred. The brainstorm anticipates "may not fit on the test machine at all"; on this 128 GB machine it would fit easily, but a "fits-on-128GB" data point isn't useful for the 8 GB scenario. To capture, run `bash scripts/measure-memory.sh` without `SKIP_BF16=1`. Adding the row is a few minutes of wall time; deferred to keep this report focused on what's currently relevant.

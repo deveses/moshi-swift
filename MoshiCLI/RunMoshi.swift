@@ -94,9 +94,9 @@ func runMoshiMic(
                     }
                 }
                 totalSteps += 1
-                if totalSteps == 100 {
+                if stepSnapshotMilestones.contains(totalSteps) {
                     MemoryLog.shared.snapshot(
-                        "after-step-100", kvCacheBytes: moshi.kvCacheMemoryBytes())
+                        "after-step-\(totalSteps)", kvCacheBytes: moshi.kvCacheMemoryBytes())
                 }
             }
         }
@@ -105,13 +105,16 @@ func runMoshiMic(
     microphoneCapture.stopCapturing()
 }
 
+let stepSnapshotMilestones: Set<Int> = [100, 256, 512, 1024, 2048, 3000]
+
 func runMoshi(
     _ url: URL,
     cfg: LmConfig,
     audioFile: URL?,
     channel: Int = 0,
     mimiModel: String = defaultMimiModel,
-    warmup: WarmupMode = .full
+    warmup: WarmupMode = .full,
+    repeatInput: Int = 1
 ) throws {
     let stats = PerfStats()
     let moshi = try makeMoshi(url, cfg)
@@ -140,6 +143,7 @@ func runMoshi(
     var pcmOuts: [[Float]] = []
     var allAudioTokens: [MLXArray] = []
     var totalSteps = 0
+    for _ in 0..<max(repeatInput, 1) {
     for start in stride(from: 0, to: pcm.count, by: chunkSize) {
         let end = min(start + chunkSize, pcm.count)
         let pcmA = MLXArray(pcm[start..<end])[.newAxis, .newAxis]
@@ -176,12 +180,13 @@ func runMoshi(
                     stats.onEvent(.endDecode)
                 }
                 totalSteps += 1
-                if totalSteps == 100 {
+                if stepSnapshotMilestones.contains(totalSteps) {
                     MemoryLog.shared.snapshot(
-                        "after-step-100", kvCacheBytes: moshi.kvCacheMemoryBytes())
+                        "after-step-\(totalSteps)", kvCacheBytes: moshi.kvCacheMemoryBytes())
                 }
             }
         }
+    }
     }
     print()
     try save(

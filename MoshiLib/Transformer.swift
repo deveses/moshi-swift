@@ -322,7 +322,10 @@ public class Transformer: Module {
 
     public func makeCache(bSize: Int, useTurboQuant: Bool = false) -> [KVCache] {
         let kvHeads = cfg.numHeads / cfg.kvRepeat
-        let dtype = self.layers.first!.selfAttn.inProj.weight.dtype
+        // Compute dtype, not weight dtype: a quantized inProj has weight.dtype == .uint32 (packed
+        // storage) which would over-allocate the K/V buffers 2×. All current Moshi configs use
+        // bf16 compute dtype.
+        let dtype: DType = .bfloat16
         let cache = (0..<cfg.numLayers).map { layerIdx in
             let cache: KVCache
             if useTurboQuant {

@@ -122,6 +122,12 @@ struct Run: ParsableCommand {
     @Option(help: "override main transformer context (default: config-provided)")
     var mainContext: Int?
 
+    @Flag(help: "use RotatingKVCache for the main transformer (caps allocation at context)")
+    var rotatingKvCache: Bool = false
+
+    @Option(help: "process the input audio this many times in a row (default: 1)")
+    var repeatInput: Int = 1
+
     @OptionGroup var memlogOptions: MemlogOptions
     @OptionGroup var warmupOptions: WarmupOptions
 
@@ -136,12 +142,15 @@ struct Run: ParsableCommand {
         if let mainContext {
             cfg.transformer.context = mainContext
         }
+        if rotatingKvCache {
+            cfg.transformer.useRotatingKVCache = true
+        }
 
         switch input {
         case .none:
             try runMoshi(
                 model, cfg: cfg, audioFile: nil, mimiModel: mimiModel,
-                warmup: warmupOptions.warmup)
+                warmup: warmupOptions.warmup, repeatInput: repeatInput)
         case .some("mic"):
             try runMoshiMic(
                 model, cfg: cfg, mimiModel: mimiModel, warmup: warmupOptions.warmup)
@@ -149,7 +158,7 @@ struct Run: ParsableCommand {
             let audioFile = URL(fileURLWithPath: input)
             try runMoshi(
                 model, cfg: cfg, audioFile: audioFile, channel: channel, mimiModel: mimiModel,
-                warmup: warmupOptions.warmup)
+                warmup: warmupOptions.warmup, repeatInput: repeatInput)
         }
     }
 }
