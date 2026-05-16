@@ -27,6 +27,7 @@ struct ModelView: View {
     @State private var useTurboQuant = false
     @State private var useRotatingKvCache = false
     @State private var lowMemoryMode = false
+    @State private var mlxCacheLimitMB: String = ""
     @State private var showSettings = false
     @State private var memlogEnabled = false
     @State private var memlogPath: String? = nil
@@ -109,6 +110,15 @@ struct ModelView: View {
                                 Label("Low memory mode", systemImage: "leaf")
                             }
                             .disabled(model.running)
+
+                            HStack {
+                                Label("MLX cache (MB)", systemImage: "tray.full")
+                                Spacer()
+                                TextField("default", text: $mlxCacheLimitMB)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 80)
+                                    .disabled(model.running)
+                            }
 
                             Toggle(isOn: $sendToSpeaker) {
                                 Label("Use External Speaker", systemImage: "speaker.wave.2")
@@ -195,6 +205,9 @@ struct ModelView: View {
         let warmup = self.warmupMode
         let useRotatingKvCache = self.useRotatingKvCache
         let lowMemoryMode = self.lowMemoryMode
+        if let mb = Int(mlxCacheLimitMB), mb > 0 {
+            MLX.GPU.set(cacheLimit: mb * 1024 * 1024)
+        }
         Task(priority: .utility) {
             await model.generate(
                 self.modelType, useTurboQuant: useTurboQuant, warmup: warmup,

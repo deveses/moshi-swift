@@ -105,6 +105,15 @@ struct LowMemoryOptions: ParsableArguments {
     var lowMemory: Bool = false
 }
 
+struct MlxOptions: ParsableArguments {
+    @Option(help: "cap MLX GPU cache memory (bytes); trades latency for memory")
+    var mlxCacheLimit: Int?
+
+    func apply() {
+        if let mlxCacheLimit { MLX.GPU.set(cacheLimit: mlxCacheLimit) }
+    }
+}
+
 struct Run: ParsableCommand {
     @Argument(help: "the model to run")
     var model: String
@@ -136,8 +145,10 @@ struct Run: ParsableCommand {
     @OptionGroup var memlogOptions: MemlogOptions
     @OptionGroup var warmupOptions: WarmupOptions
     @OptionGroup var lowMemoryOptions: LowMemoryOptions
+    @OptionGroup var mlxOptions: MlxOptions
 
     mutating func run() throws {
+        mlxOptions.apply()
         try memlogOptions.install()
         let model = try maybeDownloadFromHub(filename: model)
         var cfg =
@@ -264,8 +275,10 @@ struct RunHelium: ParsableCommand {
     @OptionGroup var memlogOptions: MemlogOptions
     @OptionGroup var warmupOptions: WarmupOptions
     @OptionGroup var lowMemoryOptions: LowMemoryOptions
+    @OptionGroup var mlxOptions: MlxOptions
 
     mutating func run() throws {
+        mlxOptions.apply()
         try memlogOptions.install()
         let cfg = LmConfig.helium2b()
         let filename =
@@ -310,8 +323,10 @@ struct RunAsr: ParsableCommand {
     @OptionGroup var memlogOptions: MemlogOptions
     @OptionGroup var warmupOptions: WarmupOptions
     @OptionGroup var lowMemoryOptions: LowMemoryOptions
+    @OptionGroup var mlxOptions: MlxOptions
 
     mutating func run() throws {
+        mlxOptions.apply()
         try memlogOptions.install()
         let model = try maybeDownloadFromHub(filename: model)
         let weights = try loadArrays(url: model)

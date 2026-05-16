@@ -140,24 +140,51 @@ Two issues surfaced during this sweep:
 
 The initial run of rotating ctx=1024 reported ~1036 MB instead of the expected ~512 MiB. Root cause: [Transformer.swift:325-328](MoshiLib/Transformer.swift#L325-L328) was reading the dtype from `selfAttn.inProj.weight.dtype`, which for a quantized model is the *storage* dtype (`uint32`, 4 bytes/element) rather than the *compute* dtype (`bf16`, 2 bytes/element). Fix: hardcode `bfloat16` for the RotatingKVCache allocation. Re-measured numbers above are post-fix.
 
-### Wrap-correctness bug (unfixed)
+### "Wrap-correctness bug" — investigated and dismissed
 
-`RotatingKVCache` produces garbled output once the buffer wraps (i.e., once `offset > maxSize`). The brainstorm's caveat — "the causal mask and offset semantics must be checked carefully for the main LM" — is real. The no-wrap case (ctx=3000 with ~2119 steps) produces normal English dialogue, identical in character to the simple-cache baseline. The wrap case (ctx=1024 wraps at step ~1024) starts degrading shortly after the wrap point.
+A close reading of the post-fix output suggested the rotating cache was breaking once the buffer wrapped. Subsequent investigation (closed in [Task 09](tasks/09-rotating-kv-cache-wrap-fix.md)) shows this was a misdiagnosis. Running `KVCacheSimple` with `--main-context 1024` and the same 13-repeat workload produces the same degradation pattern — because the attention path slices the keys/values down to the last `context` entries once `kLen > context`, and Moshi was trained for `context = 3000`. The model degrades when fed a truncated view of the conversation regardless of cache implementation.
 
-Likely suspects (not yet diagnosed):
-
-- In-place slice assignment `self.keys[..., currentOffset..<tMax] = ...` in `RotatingKVCache.update` may not be propagating the write through MLX's lazy evaluation graph the way the index-read assumes.
-- RoPE position-offset interaction with the rotated buffer layout (each cell now carries the rotation at its *original* position, not its current buffer index — algorithmically this is correct but subtle, easy to get wrong by one).
-- The always-on attention mask for `t == 1` in the rotating path (KVCacheSimple short-circuits this case).
-
-A follow-up task ([09](tasks/09-rotating-kv-cache-wrap-fix.md)) tracks the correctness fix. Until it lands, rotating cache should not be advertised as a memory-reduction lever for long sessions — only as a no-wrap pre-allocation alternative for sessions known to stay under `context` steps.
+`RotatingKVCache` was also reimplemented as a functional sliding window (append-and-drop on `concatenated`) to make the invariant easier to verify; output is identical to `KVCacheSimple` for any session shorter than `context` steps.
 
 ### What ships from Task 06
 
-- `--main-context N` and `--rotating-kv-cache` CLI flags on `Run`; `--repeat-input N` for measurement; multi-step snapshot milestones in the CLI.
+- `--main-context N`, `--rotating-kv-cache`, `--repeat-input N` CLI flags on `Run`; multi-step snapshot milestones at steps 100/256/512/1024/2048/3000.
 - App toggle in [Moshi/ModelView.swift](Moshi/ModelView.swift) (mutually exclusive with TurboQuant).
 - Dtype fix in `Transformer.makeCache` — gives a real 2× cut for the rotating allocation on quantized models.
-- The wrap-correctness bug as a documented follow-up.
+- Functional sliding-window reimplementation of `RotatingKVCache` (append + drop oldest), replacing the in-place rotation pattern.
+- Empirical finding: reducing `context` below the trained value (3000) degrades output regardless of cache type. The brainstorm's §3/§4 levers therefore do not deliver Moshi-quality output at long-conversation step counts — see [Task 09](tasks/09-rotating-kv-cache-wrap-fix.md) for analysis.
+
+## Low-memory mode sweep (Task 07)
+
+Measured on q8 large, 13 repeats (~2119 generation steps). JSONL in [measurements/2026-05-15-low-memory/](measurements/2026-05-15-low-memory/).
+
+| Setting | Peak resident | Peak MLX active | End-of-run artifacts on disk |
+| --- | --- | --- | --- |
+| default | 8.0 GB | 10.3 GB | `moshi-out.wav` 56 MB · `moshi-trace.json` 3.1 MB · `moshi-codes.safetensors` 234 KB |
+| `--low-memory` | 9.0 GB | 10.3 GB | (skipped) |
+
+Findings:
+
+- **Run-to-run resident-memory variance dominates the measured signal.** The 0.9 GB delta above is noise — repeated runs of either configuration show ±0.5 GB swings on this machine. The actual in-memory savings from skipping the accumulators are bounded by the file-output sizes (~60 MB for a 13-repeat run; would scale to ~22 GB for an 8-hour session).
+- **Output coherence is unchanged.** Both modes produce sensible English dialogue on the bria sample; only the file artifacts differ.
+- **Task 07's real value is at very long sessions** where the accumulators would otherwise grow unbounded (mic mode running for hours). The change is essentially free for short sessions.
+- The app's `Evaluator.output` cap (4000 chars, half-truncate on overflow) prevents the displayed-text string from growing without bound — separate from the PerfStats fix and important for live UI sessions.
+
+## MLX cache limit sweep (Task 08)
+
+Single-repeat q8 large with various `--mlx-cache-limit` values. Default behaviour is no cap. JSONL in [measurements/2026-05-15-mlx-cache/](measurements/2026-05-15-mlx-cache/).
+
+| Setting | Peak MLX cache | Peak resident | Wall time |
+| --- | --- | --- | --- |
+| default (no cap) | 470.6 MB | 8.00 GB | 18s |
+| `--mlx-cache-limit 67108864` (64 MB) | 69.7 MB | 8.00 GB | 18s |
+| `--mlx-cache-limit 16777216` (16 MB) | 46.5 MB | 8.00 GB | 19s |
+
+Findings:
+
+- **Cache cap honoured with mild slack.** 64 MB cap → 70 MB peak (close). 16 MB cap → 47 MB peak (MLX has an internal floor that ignores very-low values).
+- **Negligible latency penalty.** Wall time within timing noise (±1s on an 18s run). The trade-off only becomes visible under sustained heavy workloads, which the bria sample doesn't exercise.
+- **Peak resident unchanged.** The MLX cache is a small fraction of the 8 GB total (weights dominate); capping it doesn't move the resident-memory needle. The lever's value is for *concurrent* workloads or transient buffer reclamation between model switches, not for fitting q8 on an 8 GB Mac.
 
 ## Missing
 
