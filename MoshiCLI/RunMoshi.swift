@@ -20,6 +20,8 @@ func makeMoshi(_ url: URL, _ cfg: LmConfig) throws -> LM {
         quantize(model: model, groupSize: 64, bits: 6)
     } else if url.lastPathComponent.hasSuffix(".q8.safetensors") {
         quantize(model: model, groupSize: 64, bits: 8)
+    } else if url.lastPathComponent.hasSuffix(".mp.safetensors") {
+        applyMixedPrecisionPolicy(model: model)
     }
     MemoryLog.shared.snapshot("after-quantize-moshi")
     try model.update(parameters: parameters, verify: [.all])
