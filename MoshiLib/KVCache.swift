@@ -393,38 +393,44 @@ class TurboQuantKVCache: KVCache, Evaluatable {
     }
 }
 
+// Sliding-window KV cache. Keeps only the most recent `maxSize` tokens by appending new K/V and
+// dropping the oldest once the window is full. Functional (no in-place buffer mutation), so the
+// MLX dependency graph stays simple. Memory at steady state is `maxSize` tokens; peak transient
+// during update is `maxSize + t`.
 class RotatingKVCache: KVCache, Evaluatable {
-    let keys: MLXArray
-    let values: MLXArray
+    var keys: MLXArray?
+    var values: MLXArray?
     let maxSize: Int
     var offset: Int = 0
 
     init(bSize: Int, numHeads: Int, maxSize: Int, headDim: Int, dtype: DType) {
-        self.keys = MLXArray.zeros([bSize, numHeads, maxSize, headDim], dtype: dtype)
-        self.values = MLXArray.zeros([bSize, numHeads, maxSize, headDim], dtype: dtype)
+        _ = (bSize, numHeads, headDim, dtype)
         self.maxSize = maxSize
     }
 
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let t = keys.dim(2)
-        if t > self.maxSize {
-            fatalError("query to update with shape \(keys.shape) larger than maxSize \(maxSize)")
-        }
-        let currentOffset = self.offset % self.maxSize
-        let tMax = min(self.maxSize, currentOffset + t)
-        self.keys[0..., 0..., currentOffset..<tMax] = keys[0..., 0..., 0..<(tMax - currentOffset)]
-        self.values[0..., 0..., currentOffset..<tMax] =
-            values[0..., 0..., 0..<(tMax - currentOffset)]
-        let leftToCopy = t - tMax + currentOffset
-        if 0 < leftToCopy {
-            self.keys[0..., 0..., 0..<leftToCopy] = keys[0..., 0..., (tMax - currentOffset)...]
-            self.values[0..., 0..., 0..<leftToCopy] = values[0..., 0..., (tMax - currentOffset)...]
+        if let existingKeys = self.keys, let existingValues = self.values {
+            var merged = concatenated([existingKeys, keys], axis: 2)
+            var mergedV = concatenated([existingValues, values], axis: 2)
+            if merged.dim(2) > self.maxSize {
+                let drop = merged.dim(2) - self.maxSize
+                merged = merged[.ellipsis, drop..., 0...]
+                mergedV = mergedV[.ellipsis, drop..., 0...]
+            }
+            self.keys = merged
+            self.values = mergedV
+        } else {
+            self.keys = keys
+            self.values = values
         }
         self.offset += t
-        return (self.keys, self.values)
+        return (self.keys!, self.values!)
     }
 
     func reset() {
+        self.keys = nil
+        self.values = nil
         offset = 0
     }
 
@@ -434,21 +440,16 @@ class RotatingKVCache: KVCache, Evaluatable {
 
     func createAttentionMask(h: MLXArray) -> MLXArray? {
         let t = h.dim(1)
-        let finalOffset = self.offset + t
-        let finalOffsetMod = finalOffset % self.maxSize
-        // As a default we use finalOffset + 1 so that these slices cannot be seen.
-        var rinds = Array(repeating: Int32(finalOffset + 1), count: self.maxSize)
-        for i in 0..<finalOffsetMod {
-            rinds[i] = Int32(finalOffset + i - finalOffsetMod)
+        if t == 1 {
+            return nil
         }
-        if finalOffsetMod != finalOffset {
-            for i in finalOffsetMod..<rinds.count {
-                rinds[i] = Int32(finalOffset + i - finalOffsetMod - rinds.count)
-            }
-        }
-        let linds = MLXArray(Int32(self.offset)..<Int32(self.offset + t))
-        let mask = linds[0..., .newAxis] .< MLXArray(rinds)[.newAxis]
-        let res = (mask * Float32(-1e9)).asType(h.dtype)
-        return res
+        // For multi-token, attention is over the sliding window plus the new t tokens; the
+        // returned k has shape [..., min(maxSize, offset + t), ...]. Standard causal mask on
+        // the query batch is correct because dropped tokens are not visible.
+        let rinds = MLXArray(Int32(0)..<Int32(self.offset + t))
+        let linds =
+            self.offset != 0 ? MLXArray(Int32(self.offset)..<Int32(self.offset + t)) : rinds
+        let mask = linds[0..., .newAxis] .< rinds[.newAxis]
+        return (mask * Float32(-1e9)).asType(h.dtype)
     }
 }
