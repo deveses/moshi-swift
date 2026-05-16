@@ -18,6 +18,7 @@ import MoshiLib
 import SwiftUI
 import Synchronization
 import AVFoundation
+import UniformTypeIdentifiers
 
 struct ModelView: View {
     @Binding var model: Evaluator
@@ -32,6 +33,7 @@ struct ModelView: View {
     @State private var memlogEnabled = false
     @State private var memlogPath: String? = nil
     @State private var showMemoryWarning = false
+    @State private var showFilePicker = false
     @State private var warmupMode: WarmupMode = {
         #if os(iOS)
             return .minimal
@@ -188,9 +190,30 @@ struct ModelView: View {
             #endif
             Text("Estimated need: \(needed.formattedGB) · Available: \(available.formattedGB).\n\n\(hint)")
         }
+        .fileImporter(
+            isPresented: $showFilePicker,
+            allowedContentTypes: [UTType(filenameExtension: "safetensors") ?? .data]
+        ) { result in
+            guard let preset = modelType.moshiPreset else { return }
+            switch result {
+            case .success(let url):
+                if PickedModelBookmark.save(url: url, presetName: preset.name) {
+                    generate()
+                }
+            case .failure(let error):
+                print("file picker failed: \(error)")
+            }
+        }
     }
 
     private func generate() {
+        if let preset = modelType.moshiPreset,
+            preset.requiresUserPickedFile,
+            PickedModelBookmark.resolve(presetName: preset.name) == nil
+        {
+            showFilePicker = true
+            return
+        }
         if let preset = modelType.moshiPreset,
             !MemoryBudget.fitsLikely(estimatedBytes: preset.estimatedSteadyStateBytes)
         {

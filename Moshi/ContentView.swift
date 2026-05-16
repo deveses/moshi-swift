@@ -29,6 +29,10 @@ struct MoshiModelPreset {
     let mimiRepo: String
     let mimiFilename: String
     let estimatedSteadyStateBytes: Int
+    // When true, the GUI must present a file picker before load; the picked URL
+    // is persisted via a security-scoped bookmark. `modelRepo`/`modelFilename`
+    // are ignored on this code path.
+    var requiresUserPickedFile: Bool = false
 }
 
 enum ModelSelect: String, CaseIterable, Identifiable {
@@ -36,6 +40,7 @@ enum ModelSelect: String, CaseIterable, Identifiable {
     case moshiQ4
     case moshiQ8
     case moshiBf16
+    case moshiMixed
     case mimi
     case asr
     case helium
@@ -53,6 +58,8 @@ enum ModelSelect: String, CaseIterable, Identifiable {
             return "Moshi q8"
         case .moshiBf16:
             return "Moshi BF16"
+        case .moshiMixed:
+            return "Moshi q4/q8 mixed"
         case .asr:
             return "ASR 1B"
         case .qwen:
@@ -76,6 +83,9 @@ enum ModelSelect: String, CaseIterable, Identifiable {
         case .moshiBf16:
             return
                 "The larger Moshi model in BF16 precision. This is the heaviest Moshi option and needs the most memory."
+        case .moshiMixed:
+            return
+                "Mixed-precision Moshi 7B: bulk transformer at q4, embeddings + output head + depformer at q8. Targets ~5 GB of weights — lighter than q8, heavier than q4."
         case .asr:
             return
                 "A speech recognition model that transcribes microphone input in real time."
@@ -133,6 +143,16 @@ enum ModelSelect: String, CaseIterable, Identifiable {
                 mimiRepo: "kyutai/moshika-mlx-bf16",
                 mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors",
                 estimatedSteadyStateBytes: 15_032_385_536)
+        case .moshiMixed:
+            return MoshiModelPreset(
+                name: "Moshi q4/q8 mixed",
+                cfg: LmConfig.moshi_2024_07(),
+                modelRepo: "strumecki/moshika-mlx-mp",
+                modelFilename: "model.mp.safetensors",
+                localResourceName: nil,
+                mimiRepo: "kyutai/moshika-mlx-bf16",
+                mimiFilename: "tokenizer-e351c8d8-checkpoint125.safetensors",
+                estimatedSteadyStateBytes: 5_500_000_000)
         default:
             return nil
         }
@@ -146,7 +166,9 @@ struct ContentView: View {
     @Environment(DeviceStat.self) private var deviceStat
 
     // Currently available models
-    private let availableModels: [ModelSelect] = [.moshi, .moshiQ4, .moshiQ8, .moshiBf16, .asr]
+    private let availableModels: [ModelSelect] = [
+        .moshi, .moshiQ4, .moshiQ8, .moshiBf16, .moshiMixed, .asr,
+    ]
     var body: some View {
         Group {
             if availableModels.count == 1 {
@@ -287,6 +309,8 @@ class Evaluator {
             quantize(model: model, groupSize: 64, bits: 6)
         } else if url.lastPathComponent.hasSuffix(".q8.safetensors") {
             quantize(model: model, groupSize: 64, bits: 8)
+        } else if url.lastPathComponent.hasSuffix(".mp.safetensors") {
+            applyMixedPrecisionPolicy(model: model)
         }
         MemoryLog.shared.snapshot("after-quantize-moshi")
         try model.update(parameters: parameters, verify: [.all])
@@ -516,7 +540,7 @@ class Evaluator {
         self.loadState = .idle
         let m: ModelState
         switch sm {
-        case .moshi, .moshiQ4, .moshiQ8, .moshiBf16:
+        case .moshi, .moshiQ4, .moshiQ8, .moshiBf16, .moshiMixed:
             guard let preset = sm.moshiPreset else {
                 throw CustomError("missing Moshi preset for \(sm.name)")
             }
@@ -820,15 +844,19 @@ struct MoshiModel: Model {
         await ev.setModelInfo("building model")
         let url: URL
         let cfg = preset.cfg
-        let localURL = preset.localResourceName.flatMap {
+        if preset.requiresUserPickedFile {
+            guard let pickedURL = PickedModelBookmark.resolve(presetName: preset.name) else {
+                throw CustomError(
+                    "missing checkpoint for \(preset.name); pick a .safetensors file first")
+            }
+            url = pickedURL
+        } else if let localURL = preset.localResourceName.flatMap({
             Bundle.main.url(forResource: $0, withExtension: "safetensors")
-        }
-        switch localURL {
-        case .none:
+        }) {
+            url = localURL
+        } else {
             url = try await ev.downloadFromHub(
                 id: preset.modelRepo, filename: preset.modelFilename)
-        case .some(let localURL):
-            url = localURL
         }
         self.moshi = try await ev.makeMoshi(
             url, cfg, useTurboQuant: useTurboQuant, useRotatingKvCache: useRotatingKvCache)
