@@ -46,7 +46,7 @@ func loadVocab(_ cfg: LmConfig) throws -> [Int: String] {
 
 func runMoshiMic(
     _ url: URL, cfg: LmConfig, mimiModel: String = defaultMimiModel,
-    warmup: WarmupMode = .full
+    warmup: WarmupMode = .full, lowMemory: Bool = false
 ) throws {
     let moshi = try makeMoshi(url, cfg)
     let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
@@ -114,9 +114,11 @@ func runMoshi(
     channel: Int = 0,
     mimiModel: String = defaultMimiModel,
     warmup: WarmupMode = .full,
-    repeatInput: Int = 1
+    repeatInput: Int = 1,
+    lowMemory: Bool = false
 ) throws {
     let stats = PerfStats()
+    stats.lowMemory = lowMemory
     let moshi = try makeMoshi(url, cfg)
     let mimi = try makeMimi(numCodebooks: 16, modelFilename: mimiModel)
     let vocab = try loadVocab(cfg)
@@ -170,10 +172,12 @@ func runMoshi(
                 let audioTokens = gen.lastAudioTokens()
                 if let audioTokens = audioTokens {
                     let audioTokens = audioTokens[0..., 0..., .newAxis]
-                    allAudioTokens.append(audioTokens)
+                    if !lowMemory {
+                        allAudioTokens.append(audioTokens)
+                    }
                     stats.onEvent(.beginDecode)
                     let pcmOut = mimi.decodeStep(StreamArray(audioTokens))
-                    if let p = pcmOut.asArray() {
+                    if !lowMemory, let p = pcmOut.asArray() {
                         let p: [Float] = p[0, 0].asArray(Float.self)
                         pcmOuts.append(p)
                     }
@@ -189,19 +193,23 @@ func runMoshi(
     }
     }
     print()
-    try save(
-        arrays: ["codes": concatenated(allAudioTokens, axis: -1)],
-        url: URL(fileURLWithPath: "moshi-codes.safetensors"))
-    try stats.writeJSONTrace(url: URL(fileURLWithPath: "moshi-trace.json"))
-    try writeWAVFile(
-        pcmOuts.flatMap { $0 },
-        sampleRate: 24000,
-        outputURL: URL(fileURLWithPath: "moshi-out.wav"))
+    if !lowMemory {
+        try save(
+            arrays: ["codes": concatenated(allAudioTokens, axis: -1)],
+            url: URL(fileURLWithPath: "moshi-codes.safetensors"))
+        try stats.writeJSONTrace(url: URL(fileURLWithPath: "moshi-trace.json"))
+        try writeWAVFile(
+            pcmOuts.flatMap { $0 },
+            sampleRate: 24000,
+            outputURL: URL(fileURLWithPath: "moshi-out.wav"))
+    }
 }
 
 func runAsr(
-    _ url: URL, _ cfg: LmConfig, audioFile: URL?, channel: Int, warmup: WarmupMode = .full
+    _ url: URL, _ cfg: LmConfig, audioFile: URL?, channel: Int, warmup: WarmupMode = .full,
+    lowMemory: Bool = false
 ) throws {
+    _ = lowMemory  // ASR currently has no per-step accumulators worth dropping
     let moshi = try makeMoshi(url, cfg)
     let mimi = try makeMimi(numCodebooks: 32)
     let vocab = try loadVocab(cfg)
@@ -242,7 +250,10 @@ func runAsr(
     print()
 }
 
-func runAsrMic(_ url: URL, _ cfg: LmConfig, warmup: WarmupMode = .full) throws {
+func runAsrMic(
+    _ url: URL, _ cfg: LmConfig, warmup: WarmupMode = .full, lowMemory: Bool = false
+) throws {
+    _ = lowMemory
     let moshi = try makeMoshi(url, cfg)
     let mimi = try makeMimi(numCodebooks: 32)
     let vocab = try loadVocab(cfg)

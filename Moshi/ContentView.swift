@@ -205,8 +205,21 @@ class Evaluator {
     var bufferedDuration: Double = 0.0
     var totalDuration: Double = 0.0
     var kvCacheMemoryBytes: Int = 0
+    var lowMemoryMode: Bool = false
     let shouldStop: Atomic<Bool> = .init(false)
     let cb: PerfStats = PerfStats()
+
+    private static let outputCharCap = 4000
+
+    /// Append to `output`, truncating the head to ~half the cap if we're over the cap and in
+    /// low-memory mode. Use instead of `output += s` so the buffer can't grow unbounded during
+    /// long sessions.
+    func appendOutput(_ s: String) {
+        if lowMemoryMode && output.count > Self.outputCharCap {
+            output = String(output.suffix(Self.outputCharCap / 2))
+        }
+        output += s
+    }
 
     enum LoadState {
         case idle
@@ -390,7 +403,7 @@ class Evaluator {
 
     func generate(
         _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full,
-        useRotatingKvCache: Bool = false
+        useRotatingKvCache: Bool = false, lowMemoryMode: Bool = false
     ) async {
         guard !running else { return }
 
@@ -399,6 +412,8 @@ class Evaluator {
         self.output = ""
         self.totalDuration = 0.0
         self.kvCacheMemoryBytes = 0
+        self.lowMemoryMode = lowMemoryMode
+        self.cb.lowMemory = lowMemoryMode
         running = true
         do {
             let model = try await load(
@@ -608,7 +623,7 @@ struct MimiModel: Model {
                 if currentStep % 4 == 0 {
                     let v = sampleWords[(currentStep / 4) % sampleWords.count] + " "
                     Task { @MainActor in
-                        ev.output += v
+                        ev.appendOutput(v)
                     }
                 }
                 currentStep += 1
@@ -652,7 +667,7 @@ struct QwenModel_: Model {
             lastToken = tok.item<Int>()
             let s = tokenizer.decode(tokens: [lastToken])
             Task { @MainActor in
-                ev.output += s
+                ev.appendOutput(s)
             }
         }
 
@@ -699,12 +714,12 @@ struct HeliumModel: Model {
             if var v = vocab[textTokenI] {
                 if v == "<0x0A>" {
                     Task { @MainActor in
-                        ev.output += "\n"
+                        ev.appendOutput("\n")
                     }
                 } else {
                     v.replace("▁", with: " ")
                     Task { @MainActor in
-                        ev.output += v
+                        ev.appendOutput(v)
                     }
                 }
             }
@@ -769,7 +784,7 @@ struct AsrModel: Model {
             print(v, terminator: "")
             fflush(stdout)
             Task { @MainActor in
-                ev.output += v
+                ev.appendOutput(v)
             }
         }
         chunksSeen += 1
@@ -870,7 +885,7 @@ struct MoshiModel: Model {
                             print(v, terminator: "")
                             fflush(stdout)
                             Task { @MainActor in
-                                ev.output += v
+                                ev.appendOutput(v)
                             }
                         }
                     }

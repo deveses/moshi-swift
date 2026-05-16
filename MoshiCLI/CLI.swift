@@ -100,6 +100,11 @@ struct WarmupOptions: ParsableArguments {
     var warmup: WarmupMode = .full
 }
 
+struct LowMemoryOptions: ParsableArguments {
+    @Flag(help: "skip per-token accumulators and trace; cap event log at 1000 entries")
+    var lowMemory: Bool = false
+}
+
 struct Run: ParsableCommand {
     @Argument(help: "the model to run")
     var model: String
@@ -130,6 +135,7 @@ struct Run: ParsableCommand {
 
     @OptionGroup var memlogOptions: MemlogOptions
     @OptionGroup var warmupOptions: WarmupOptions
+    @OptionGroup var lowMemoryOptions: LowMemoryOptions
 
     mutating func run() throws {
         try memlogOptions.install()
@@ -150,15 +156,18 @@ struct Run: ParsableCommand {
         case .none:
             try runMoshi(
                 model, cfg: cfg, audioFile: nil, mimiModel: mimiModel,
-                warmup: warmupOptions.warmup, repeatInput: repeatInput)
+                warmup: warmupOptions.warmup, repeatInput: repeatInput,
+                lowMemory: lowMemoryOptions.lowMemory)
         case .some("mic"):
             try runMoshiMic(
-                model, cfg: cfg, mimiModel: mimiModel, warmup: warmupOptions.warmup)
+                model, cfg: cfg, mimiModel: mimiModel, warmup: warmupOptions.warmup,
+                lowMemory: lowMemoryOptions.lowMemory)
         case .some(let input):
             let audioFile = URL(fileURLWithPath: input)
             try runMoshi(
                 model, cfg: cfg, audioFile: audioFile, channel: channel, mimiModel: mimiModel,
-                warmup: warmupOptions.warmup, repeatInput: repeatInput)
+                warmup: warmupOptions.warmup, repeatInput: repeatInput,
+                lowMemory: lowMemoryOptions.lowMemory)
         }
     }
 }
@@ -254,6 +263,7 @@ struct RunHelium: ParsableCommand {
 
     @OptionGroup var memlogOptions: MemlogOptions
     @OptionGroup var warmupOptions: WarmupOptions
+    @OptionGroup var lowMemoryOptions: LowMemoryOptions
 
     mutating func run() throws {
         try memlogOptions.install()
@@ -266,7 +276,9 @@ struct RunHelium: ParsableCommand {
             case .bf16: "helium-1-preview-2b-bf16.safetensors"
             }
         let url = try downloadFromHub(id: "kyutai/helium-1-preview-2b-mlx", filename: filename)
-        try runHelium(url, cfg: cfg, warmup: warmupOptions.warmup)
+        try runHelium(
+            url, cfg: cfg, warmup: warmupOptions.warmup,
+            lowMemory: lowMemoryOptions.lowMemory)
     }
 }
 
@@ -297,6 +309,7 @@ struct RunAsr: ParsableCommand {
 
     @OptionGroup var memlogOptions: MemlogOptions
     @OptionGroup var warmupOptions: WarmupOptions
+    @OptionGroup var lowMemoryOptions: LowMemoryOptions
 
     mutating func run() throws {
         try memlogOptions.install()
@@ -314,12 +327,17 @@ struct RunAsr: ParsableCommand {
         switch input {
         case .none:
             try runAsr(
-                model, cfg, audioFile: nil, channel: channel, warmup: warmupOptions.warmup)
-        case .some("mic"): try runAsrMic(model, cfg, warmup: warmupOptions.warmup)
+                model, cfg, audioFile: nil, channel: channel, warmup: warmupOptions.warmup,
+                lowMemory: lowMemoryOptions.lowMemory)
+        case .some("mic"):
+            try runAsrMic(
+                model, cfg, warmup: warmupOptions.warmup,
+                lowMemory: lowMemoryOptions.lowMemory)
         case .some(let input):
             let audioFile = URL(fileURLWithPath: input)
             try runAsr(
-                model, cfg, audioFile: audioFile, channel: channel, warmup: warmupOptions.warmup)
+                model, cfg, audioFile: audioFile, channel: channel, warmup: warmupOptions.warmup,
+                lowMemory: lowMemoryOptions.lowMemory)
         }
     }
 }

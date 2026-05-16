@@ -29,8 +29,11 @@ func makeHelium(_ url: URL, _ cfg: LmConfig) throws -> LM {
     return model
 }
 
-func runHelium(_ url: URL, cfg: LmConfig, warmup: WarmupMode = .full) throws {
+func runHelium(
+    _ url: URL, cfg: LmConfig, warmup: WarmupMode = .full, lowMemory: Bool = false
+) throws {
     let stats = PerfStats()
+    stats.lowMemory = lowMemory
     let helium = try makeHelium(url, cfg)
     let vocab = try loadVocab(cfg)
     MemoryLog.shared.snapshot("after-loadVocab")

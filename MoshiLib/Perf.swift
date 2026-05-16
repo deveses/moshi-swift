@@ -73,12 +73,22 @@ public class PerfStats: Callbacks {
     private var outputAudioTokens: [MLXArray] = []
     private var textTokens: [Int] = []
 
+    /// When set, drop the per-token MLX accumulators (`inputAudioTokens`, `outputAudioTokens`,
+    /// `textTokens`) and cap the rolling event log at `lowMemoryEventCap` entries. Stats
+    /// summaries still work over the recent window; `writeCodes` and `writeJSONTrace` will
+    /// produce empty / truncated output.
+    public var lowMemory: Bool = false
+    public var lowMemoryEventCap: Int = 1000
+
     public init() {
         self.log = OSLog(subsystem: "org.kyutai.moshi", category: "Performance")
     }
 
     func append(_ kind: EventKind) {
         events.append((CFAbsoluteTimeGetCurrent(), kind))
+        if lowMemory && events.count > lowMemoryEventCap {
+            events.removeFirst(events.count - lowMemoryEventCap)
+        }
     }
 
     public func onReset() {
@@ -89,15 +99,18 @@ public class PerfStats: Callbacks {
     }
 
     public func onInputAudioTokens(_ codes: MLXArray) {
+        if lowMemory { return }
         codes.eval()
         inputAudioTokens.append(codes)
     }
 
     public func onOutputTextToken(_ token: Int) {
+        if lowMemory { return }
         textTokens.append(token)
     }
 
     public func onOutputAudioTokens(_ codes: MLXArray) {
+        if lowMemory { return }
         codes.eval()
         outputAudioTokens.append(codes)
     }

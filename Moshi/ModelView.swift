@@ -26,6 +26,7 @@ struct ModelView: View {
     @State var sendToSpeaker = false
     @State private var useTurboQuant = false
     @State private var useRotatingKvCache = false
+    @State private var lowMemoryMode = false
     @State private var showSettings = false
     @State private var memlogEnabled = false
     @State private var memlogPath: String? = nil
@@ -103,6 +104,11 @@ struct ModelView: View {
                                 Label("Rotating KV Cache", systemImage: "arrow.triangle.2.circlepath")
                             }
                             .disabled(model.running || useTurboQuant)
+
+                            Toggle(isOn: $lowMemoryMode) {
+                                Label("Low memory mode", systemImage: "leaf")
+                            }
+                            .disabled(model.running)
 
                             Toggle(isOn: $sendToSpeaker) {
                                 Label("Use External Speaker", systemImage: "speaker.wave.2")
@@ -188,10 +194,11 @@ struct ModelView: View {
         let useTurboQuant = self.useTurboQuant
         let warmup = self.warmupMode
         let useRotatingKvCache = self.useRotatingKvCache
+        let lowMemoryMode = self.lowMemoryMode
         Task(priority: .utility) {
             await model.generate(
                 self.modelType, useTurboQuant: useTurboQuant, warmup: warmup,
-                useRotatingKvCache: useRotatingKvCache)
+                useRotatingKvCache: useRotatingKvCache, lowMemoryMode: lowMemoryMode)
         }
     }
 
