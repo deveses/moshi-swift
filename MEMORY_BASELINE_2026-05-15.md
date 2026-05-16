@@ -2,7 +2,7 @@
 
 Phase-by-phase memory measurements for the cached Moshi variants on a single machine. Replaces the back-of-envelope numbers in [MEMORY_FOOTPRINT_BRAINSTORM.md §"Estimated Savings for the q8 Model"](MEMORY_FOOTPRINT_BRAINSTORM.md) where they diverge.
 
-Raw JSON Lines per run are under [measurements/2026-05-15/](measurements/2026-05-15/); stdout logs are in the same directory.
+Raw JSON Lines per run are not checked in — regenerate via [scripts/measure-memory.sh](scripts/measure-memory.sh) and aggregate with [scripts/aggregate-memory.py](scripts/aggregate-memory.py).
 
 ## Test machine
 
@@ -106,7 +106,7 @@ This shifts priority: the **dominant** memory consumer in q8 large is the weight
 
 ## Warmup sweep (q4 large)
 
-After Task 04 (`--warmup full|minimal|none`), measured on the same machine and workload. JSONL in [measurements/2026-05-15-warmup/](measurements/2026-05-15-warmup/).
+After Task 04 (`--warmup full|minimal|none`), measured on the same machine and workload.
 
 | Mode | Resident @ step 100 | MLX cache @ warmup-moshi | MLX cache peak | Δ vs full (peak cache) |
 | --- | --- | --- | --- | --- |
@@ -125,7 +125,7 @@ Conclusion: Task 04's value on tight machines is ~216 MB of peak MLX cache (with
 
 ## Rotating KV cache sweep (q8 large, Task 06)
 
-13× repeated bria sample → ~2119 generation steps. Snapshots at steps 100, 256, 512, 1024, 2048. JSONL in [measurements/2026-05-15-rotating-fixed/](measurements/2026-05-15-rotating-fixed/) (post dtype-fix).
+13× repeated bria sample → ~2119 generation steps. Snapshots at steps 100, 256, 512, 1024, 2048 (post dtype-fix).
 
 | Config | Wrap? | KV @ step 1024 | KV @ step 2048 | Final KV | Output coherence |
 | --- | --- | --- | --- | --- | --- |
@@ -142,7 +142,7 @@ The initial run of rotating ctx=1024 reported ~1036 MB instead of the expected ~
 
 ### "Wrap-correctness bug" — investigated and dismissed
 
-A close reading of the post-fix output suggested the rotating cache was breaking once the buffer wrapped. Subsequent investigation (closed in [Task 09](tasks/09-rotating-kv-cache-wrap-fix.md)) shows this was a misdiagnosis. Running `KVCacheSimple` with `--main-context 1024` and the same 13-repeat workload produces the same degradation pattern — because the attention path slices the keys/values down to the last `context` entries once `kLen > context`, and Moshi was trained for `context = 3000`. The model degrades when fed a truncated view of the conversation regardless of cache implementation.
+A close reading of the post-fix output suggested the rotating cache was breaking once the buffer wrapped. Subsequent investigation shows this was a misdiagnosis. Running `KVCacheSimple` with `--main-context 1024` and the same 13-repeat workload produces the same degradation pattern — because the attention path slices the keys/values down to the last `context` entries once `kLen > context`, and Moshi was trained for `context = 3000`. The model degrades when fed a truncated view of the conversation regardless of cache implementation.
 
 `RotatingKVCache` was also reimplemented as a functional sliding window (append-and-drop on `concatenated`) to make the invariant easier to verify; output is identical to `KVCacheSimple` for any session shorter than `context` steps.
 
@@ -152,11 +152,11 @@ A close reading of the post-fix output suggested the rotating cache was breaking
 - App toggle in [Moshi/ModelView.swift](Moshi/ModelView.swift) (mutually exclusive with TurboQuant).
 - Dtype fix in `Transformer.makeCache` — gives a real 2× cut for the rotating allocation on quantized models.
 - Functional sliding-window reimplementation of `RotatingKVCache` (append + drop oldest), replacing the in-place rotation pattern.
-- Empirical finding: reducing `context` below the trained value (3000) degrades output regardless of cache type. The brainstorm's §3/§4 levers therefore do not deliver Moshi-quality output at long-conversation step counts — see [Task 09](tasks/09-rotating-kv-cache-wrap-fix.md) for analysis.
+- Empirical finding: reducing `context` below the trained value (3000) degrades output regardless of cache type. The brainstorm's §3/§4 levers therefore do not deliver Moshi-quality output at long-conversation step counts.
 
 ## Low-memory mode sweep (Task 07)
 
-Measured on q8 large, 13 repeats (~2119 generation steps). JSONL in [measurements/2026-05-15-low-memory/](measurements/2026-05-15-low-memory/).
+Measured on q8 large, 13 repeats (~2119 generation steps).
 
 | Setting | Peak resident | Peak MLX active | End-of-run artifacts on disk |
 | --- | --- | --- | --- |
@@ -172,7 +172,7 @@ Findings:
 
 ## MLX cache limit sweep (Task 08)
 
-Single-repeat q8 large with various `--mlx-cache-limit` values. Default behaviour is no cap. JSONL in [measurements/2026-05-15-mlx-cache/](measurements/2026-05-15-mlx-cache/).
+Single-repeat q8 large with various `--mlx-cache-limit` values. Default behaviour is no cap.
 
 | Setting | Peak MLX cache | Peak resident | Wall time |
 | --- | --- | --- | --- |
