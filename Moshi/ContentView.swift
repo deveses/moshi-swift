@@ -427,7 +427,8 @@ class Evaluator {
 
     func generate(
         _ sm: ModelSelect, useTurboQuant: Bool = false, warmup: WarmupMode = .full,
-        useRotatingKvCache: Bool = false, lowMemoryMode: Bool = false
+        useRotatingKvCache: Bool = false, lowMemoryMode: Bool = false,
+        inputDeviceUID: String? = nil
     ) async {
         guard !running else { return }
 
@@ -448,7 +449,7 @@ class Evaluator {
                 await self.cb.onReset()
                 // TODO: Do not create a fresh audio input/output on each session.
                 let microphoneCapture = MicrophoneCapture()
-                microphoneCapture.startCapturing()
+                microphoneCapture.startCapturing(inputDeviceUID: inputDeviceUID)
                 let ap = AudioPlayer(sampleRate: 24000)
                 try ap.startPlaying()
                 print("started the audio loops")

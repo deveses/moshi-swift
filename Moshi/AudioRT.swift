@@ -2,6 +2,10 @@ import AVFoundation
 import Foundation
 import Synchronization
 
+#if os(macOS)
+    import CoreAudio
+#endif
+
 class ThreadSafeChannel<T> {
     private var buffer: [T] = []
     private let condition = NSCondition()
@@ -34,8 +38,9 @@ class MicrophoneCapture {
         channel = ThreadSafeChannel()
     }
 
-    func startCapturing() {
+    func startCapturing(inputDeviceUID: String? = nil) {
         let inputNode = audioEngine.inputNode
+        applyInputDevice(uid: inputDeviceUID, inputNode: inputNode)
         // Setting the voice mode on macos causes weird hangs of the microphone
         // so we discard it for now.
         #if os(iOS)
@@ -112,6 +117,41 @@ class MicrophoneCapture {
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         print("Microphone capturing stopped")
+    }
+
+    private func applyInputDevice(uid: String?, inputNode: AVAudioInputNode) {
+        guard let uid, !uid.isEmpty else { return }  // empty = system default
+        #if os(macOS)
+            guard var deviceID = MacAudio.deviceID(forUID: uid) else {
+                print("input device UID not found: \(uid)")
+                return
+            }
+            guard let unit = inputNode.audioUnit else {
+                print("input node has no underlying AudioUnit")
+                return
+            }
+            let status = AudioUnitSetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &deviceID,
+                UInt32(MemoryLayout<AudioDeviceID>.size))
+            if status != noErr {
+                print("failed to set input device (status=\(status))")
+            }
+        #elseif os(iOS)
+            let session = AVAudioSession.sharedInstance()
+            if let port = (session.availableInputs ?? []).first(where: { $0.uid == uid }) {
+                do {
+                    try session.setPreferredInput(port)
+                } catch {
+                    print("setPreferredInput failed: \(error)")
+                }
+            } else {
+                print("input port UID not found: \(uid)")
+            }
+        #endif
     }
 
     func receive() -> [Float]? {

@@ -34,6 +34,8 @@ struct ModelView: View {
     @State private var memlogPath: String? = nil
     @State private var showMemoryWarning = false
     @State private var showFilePicker = false
+    @AppStorage("selectedInputDeviceUID") private var selectedInputDeviceUID: String = ""
+    @State private var inputDevices: [AudioInputDevice] = []
     @State private var warmupMode: WarmupMode = {
         #if os(iOS)
             return .minimal
@@ -121,6 +123,17 @@ struct ModelView: View {
                                     .frame(width: 80)
                                     .disabled(model.running)
                             }
+
+                            Picker(selection: $selectedInputDeviceUID) {
+                                Text("System default").tag("")
+                                ForEach(inputDevices) { dev in
+                                    Text(dev.name).tag(dev.uid)
+                                }
+                            } label: {
+                                Label("Input device", systemImage: "microphone")
+                            }
+                            .disabled(model.running)
+                            .onAppear { inputDevices = AudioInputDevice.list() }
 
                             Toggle(isOn: $sendToSpeaker) {
                                 Label("Use External Speaker", systemImage: "speaker.wave.2")
@@ -228,13 +241,15 @@ struct ModelView: View {
         let warmup = self.warmupMode
         let useRotatingKvCache = self.useRotatingKvCache
         let lowMemoryMode = self.lowMemoryMode
+        let inputDeviceUID = self.selectedInputDeviceUID
         if let mb = Int(mlxCacheLimitMB), mb > 0 {
             MLX.GPU.set(cacheLimit: mb * 1024 * 1024)
         }
         Task(priority: .utility) {
             await model.generate(
                 self.modelType, useTurboQuant: useTurboQuant, warmup: warmup,
-                useRotatingKvCache: useRotatingKvCache, lowMemoryMode: lowMemoryMode)
+                useRotatingKvCache: useRotatingKvCache, lowMemoryMode: lowMemoryMode,
+                inputDeviceUID: inputDeviceUID)
         }
     }
 
