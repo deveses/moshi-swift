@@ -103,7 +103,13 @@ struct ModelView: View {
                             Toggle(isOn: $useTurboQuant) {
                                 Label("TurboQuant KV Cache", systemImage: "memorychip")
                             }
-                            .disabled(model.running || useRotatingKvCache)
+                            .disabled(model.running || useRotatingKvCache || modelType == .moshiBf16)
+                            .onChange(of: modelType, initial: true) { _, newValue in
+                                // BF16 weights + TurboQuant quant/dequant per attention = ~2x
+                                // real-time on Apple Silicon. Force the toggle off when BF16
+                                // is selected so a stale `true` doesn't carry over.
+                                if newValue == .moshiBf16 { useTurboQuant = false }
+                            }
 
                             Toggle(isOn: $useRotatingKvCache) {
                                 Label("Rotating KV Cache", systemImage: "arrow.triangle.2.circlepath")
