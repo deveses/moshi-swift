@@ -36,6 +36,11 @@ struct ModelView: View {
     @State private var showFilePicker = false
     @AppStorage("selectedInputDeviceUID") private var selectedInputDeviceUID: String = ""
     @State private var inputDevices: [AudioInputDevice] = []
+    @State private var showStuckAdvice = false
+
+    // Show the stuck-advice alert when the model has been running for this many
+    // seconds without producing a single Main step (totalDuration still 0).
+    private let stuckDetectionSeconds: UInt64 = 12
     @State private var warmupMode: WarmupMode = {
         #if os(iOS)
             return .minimal
@@ -222,6 +227,27 @@ struct ModelView: View {
             case .failure(let error):
                 print("file picker failed: \(error)")
             }
+        }
+        .task(id: model.running) {
+            showStuckAdvice = false
+            guard model.running else { return }
+            try? await Task.sleep(nanoseconds: stuckDetectionSeconds * 1_000_000_000)
+            if model.running && model.totalDuration == 0 {
+                showStuckAdvice = true
+            }
+        }
+        .alert("Model isn't keeping up", isPresented: $showStuckAdvice) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            #if os(macOS)
+                let extraHint =
+                    "\n\nOn macOS you can also raise the GPU memory cap before launch:\n    sudo sysctl iogpu.wired_limit_mb=6144"
+            #else
+                let extraHint = ""
+            #endif
+            Text(
+                "No tokens generated in \(stuckDetectionSeconds)s. The model likely doesn't fit in RAM on this device.\n\nTry in the settings popover:\n  • Low memory mode ON\n  • Rotating KV Cache ON\n  • MLX cache 128 MB\n  • Warmup: None\n\nOr pick Moshi 1B — it fits anywhere.\(extraHint)"
+            )
         }
     }
 
